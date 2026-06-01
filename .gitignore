@@ -216,3 +216,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Credenciais
+.env
+.env.*
+*.env
+
+# Databricks
+.databricks/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Checkpoints
+checkpoints/
