@@ -82,10 +82,7 @@ SQL_PREFIX = ""
 # ─────────────────────────────────────────────
 
 def get_adls_client() -> DataLakeServiceClient:
-    """
-    Cria e retorna um cliente autenticado do ADLS Gen2
-    via Service Principal.
-    """
+    """Cria e retorna um cliente autenticado do ADLS Gen2 via Service Principal."""
     credential = ClientSecretCredential(
         tenant_id     = ADLS_TENANT_ID,
         client_id     = ADLS_CLIENT_ID,
@@ -97,35 +94,21 @@ def get_adls_client() -> DataLakeServiceClient:
     )
 
 def get_container_client():
-    """
-    Retorna o cliente do container configurado.
-    """
+    """Retorna o cliente do container configurado."""
     return get_adls_client().get_file_system_client(ADLS_CONTAINER)
 
 def get_squad2_client():
-    """
-    Retorna o cliente do container squad2 para escrita
-    de dados nas camadas bronze, silver e gold.
-    """
+    """Retorna o cliente do container squad2 para escrita de dados."""
     return get_adls_client().get_file_system_client(SQUAD2_CONTAINER)
 
 def listar_snapshots(base_path: str = None) -> set:
-    """
-    Lista todas as pastas de snapshot disponíveis no lake.
-    Padrão esperado: vendas_raw/YYYY/MM/DD/HHMMSS
-
-    Returns:
-        set: conjunto de snapshot_ids no formato YYYY/MM/DD/HHMMSS
-    """
+    """Lista todas as pastas de snapshot disponíveis no lake."""
     if base_path is None:
         base_path = PATHS["raw"]
 
     snapshots        = set()
     container_client = get_container_client()
-    paths            = container_client.get_paths(
-        path      = base_path,
-        recursive = True
-    )
+    paths            = container_client.get_paths(path=base_path, recursive=True)
 
     for item in paths:
         partes = item.name.replace(base_path + "/", "").split("/")
@@ -135,10 +118,7 @@ def listar_snapshots(base_path: str = None) -> set:
     return snapshots
 
 def ler_parquet(snapshot_id: str, tabela: str) -> "pyspark.sql.DataFrame":
-    """
-    Lê um arquivo parquet de um snapshot específico do ADLS
-    diretamente na memória e retorna um Spark DataFrame.
-    """
+    """Lê um arquivo parquet de um snapshot específico do ADLS."""
     base_path        = PATHS["raw"]
     file_path        = f"{base_path}/{snapshot_id}/{tabela}.parquet"
     container_client = get_container_client()
@@ -154,20 +134,9 @@ def ler_parquet(snapshot_id: str, tabela: str) -> "pyspark.sql.DataFrame":
 # ─────────────────────────────────────────────
 
 def get_destino_sql(tabela: str) -> str:
-    """
-    Retorna o nome completo da tabela destino no SQL Server.
-    Formato: squad2.nome_tabela
-    """
     return f"{SQL_SCHEMA}.{SQL_PREFIX}{tabela}"
 
-def gravar_sql(
-    df     : "pyspark.sql.DataFrame",
-    tabela : str,
-    mode   : str = "overwrite"
-) -> bool:
-    """
-    Grava um Spark DataFrame no SQL Server.
-    """
+def gravar_sql(df: "pyspark.sql.DataFrame", tabela: str, mode: str = "overwrite") -> bool:
     destino = get_destino_sql(tabela)
     try:
         df.write \
@@ -176,18 +145,13 @@ def gravar_sql(
             .option("dbtable", destino) \
             .mode(mode) \
             .save()
-
         log.info(f"Gravado: {destino} → {df.count()} linhas")
         return True
-
     except Exception as e:
         log.error(f"Erro ao gravar {destino}: {str(e)}")
         return False
 
 def ler_sql(tabela: str) -> "pyspark.sql.DataFrame":
-    """
-    Lê uma tabela do SQL Server e retorna um Spark DataFrame.
-    """
     destino = get_destino_sql(tabela)
     return spark.read \
         .format("sqlserver") \
@@ -196,9 +160,6 @@ def ler_sql(tabela: str) -> "pyspark.sql.DataFrame":
         .load()
 
 def validar_gravacao(tabela: str) -> bool:
-    """
-    Valida se uma tabela foi gravada corretamente no SQL Server.
-    """
     try:
         df    = ler_sql(tabela)
         count = df.count()
@@ -213,15 +174,9 @@ def validar_gravacao(tabela: str) -> bool:
 # ─────────────────────────────────────────────
 
 def get_delta_path(camada: str, tabela: str) -> str:
-    """
-    Retorna a URI nativa exigida pelo storage_options do deltalake-python.
-    """
-    return f"az://{SQUAD2_CONTAINER}/{camada}/{tabela}"
+    return f"abfss://{SQUAD2_CONTAINER}@{ADLS_STORAGE_ACCOUNT}.dfs.core.windows.net/{camada}/{tabela}"
 
 def get_storage_options() -> dict:
-    """
-    Retorna as opções de autenticação para o deltalake-python.
-    """
     return {
         "account_name"  : ADLS_STORAGE_ACCOUNT,
         "tenant_id"     : ADLS_TENANT_ID,
@@ -230,30 +185,14 @@ def get_storage_options() -> dict:
     }
 
 def delta_existe(camada: str, tabela: str) -> bool:
-    """
-    Verifica se uma Delta Table já existe no ADLS.
-    """
     try:
         from deltalake import DeltaTable
-        DeltaTable(
-            get_delta_path(camada, tabela),
-            storage_options=get_storage_options()
-        )
+        DeltaTable(get_delta_path(camada, tabela), storage_options=get_storage_options())
         return True
     except Exception:
         return False
 
-def gravar_delta(
-    df          : "pyspark.sql.DataFrame",
-    camada      : str,
-    tabela      : str,
-    mode        : str = "append",
-    particionar : bool = True
-) -> bool:
-    """
-    Grava um Spark DataFrame como Delta Table no ADLS via deltalake-python.
-    Aplica correção automática de fuso horário e reestruturação de partições.
-    """
+def gravar_delta(df: "pyspark.sql.DataFrame", camada: str, tabela: str, mode: str = "append", particionar: bool = True) -> bool:
     import pyarrow as pa
     from deltalake.writer import write_deltalake
 
@@ -262,24 +201,18 @@ def gravar_delta(
     modo_real    = mode if delta_existe(camada, tabela) else "overwrite"
 
     try:
-        pdf          = df.toPandas()
+        pdf = df.toPandas()
         
-        # Correção interna: Remove timezones do Pandas/Arrow para compatibilidade Delta v7
+        # Correção de fuso horário
         for col_name in pdf.columns:
             if pd.api.types.is_datetime64_any_dtype(pdf[col_name]):
                 pdf[col_name] = pdf[col_name].dt.tz_localize(None)
                 
         tabela_arrow = pa.Table.from_pandas(pdf)
 
-        # Configuração nativa de particionamento
         partition_by = None
         if particionar and camada == "bronze":
-            partition_by = [
-                "ingestion_year",
-                "ingestion_month",
-                "ingestion_day",
-                "ingestion_hour"
-            ]
+            partition_by = ["ingestion_year", "ingestion_month", "ingestion_day", "ingestion_hour"]
             colunas = pdf.columns.tolist()
             if not all(c in colunas for c in partition_by):
                 partition_by = None
@@ -291,36 +224,24 @@ def gravar_delta(
             storage_options = storage_opts,
             partition_by    = partition_by
         )
-
         log.info(f"Gravado com sucesso: {path} → {len(pdf)} linhas. partições: {partition_by}")
         return True
-
     except Exception as e:
-        # Auto-correção caso herde erros de layout não-particionado gerados em testes anteriores
         if "does not match table partitioning" in str(e):
             try:
-                log.warning("Layout antigo em conflito. Forçando alinhamento das partições no Storage...")
+                log.warning("Forçando alinhamento de partições no Storage...")
                 write_deltalake(
-                    table_or_uri    = path,
-                    data            = tabela_arrow,
-                    mode            = "overwrite",
-                    storage_options = storage_opts,
-                    partition_by    = partition_by,
-                    schema_mode     = "overwrite"
+                    table_or_uri=path, data=tabela_arrow, mode="overwrite",
+                    storage_options=storage_opts, partition_by=partition_by, schema_mode="overwrite"
                 )
                 return True
             except Exception as e_inner:
                 log.error(f"Falha ao reestruturar esquema Delta: {str(e_inner)}")
                 return False
-                
         log.error(f"Erro ao gravar {path}: {str(e)}")
         return False
 
 def ler_delta(camada: str, tabela: str) -> "pyspark.sql.DataFrame":
-    """
-    Lê uma Delta Table do ADLS unificando fragmentos de partições em memória
-    para mitigar exceções de ChunkedArray do PyArrow.
-    """
     from deltalake import DeltaTable
     import pyarrow as pa
 
@@ -329,27 +250,15 @@ def ler_delta(camada: str, tabela: str) -> "pyspark.sql.DataFrame":
 
     try:
         dt = DeltaTable(path, storage_options=storage_opts)
-        
-        # Consolida blocos fragmentados de partições em um vetor contíguo
         arrow_table = dt.to_pyarrow_table().combine_chunks()
         pdf = arrow_table.to_pandas()
-        
-        log.info(f"Lido via deltalake-engine: {len(pdf)} linhas")
         return spark.createDataFrame(pdf)
-
     except Exception as e1:
-        log.warning(f"Engine principal indisponível ({str(e1)[:50]}). Executando Fallback via Azure SDK...")
-        
-        import io
-        import pandas as pd
+        log.warning(f"Engine principal falhou, executando Fallback via Azure SDK...")
         squad2_client = get_squad2_client()
         frames = []
-        
         paths = list(squad2_client.get_paths(path=f"{camada}/{tabela}", recursive=True))
-        parquets = [
-            p.name for p in paths 
-            if p.name.endswith(".parquet") and "_delta_log" not in p.name
-        ]
+        parquets = [p.name for p in paths if p.name.endswith(".parquet") and "_delta_log" not in p.name]
 
         for p in parquets:
             file_client = squad2_client.get_file_client(p)
@@ -358,56 +267,38 @@ def ler_delta(camada: str, tabela: str) -> "pyspark.sql.DataFrame":
             frames.append(pdf_part)
 
         if frames:
-            pdf_total = pd.concat(frames, ignore_index=True)
-            log.info(f"Lido via Fallback Azure SDK: {len(pdf_total)} linhas")
-            return spark.createDataFrame(pdf_total)
+            return spark.createDataFrame(pd.concat(frames, ignore_index=True))
         else:
-            raise Exception(f"Nenhum arquivo encontrado para a tabela {tabela} na camada {camada}")
+            raise Exception(f"Nenhum arquivo encontrado em {camada}/{tabela}")
 
 def get_nome_delta(camada: str, tabela: str) -> str:
-    """
-    Retorna o path de compatibilidade da Delta Table.
-    """
     return get_delta_path(camada, tabela)
 
 # ─────────────────────────────────────────────
-# FUNÇÕES — CHECKPOINT & CONTROLE (MIGRADO PARA JSON)
+# FUNÇÕES — CHECKPOINT & CONTROLE (JSON)
 # ─────────────────────────────────────────────
 
 def get_control_path(tabela: str) -> tuple:
-    """
-    Retorna o cliente e o caminho estruturado na nova pasta unificada 'control/'
-    """
-    container_client = get_container_client()
+    container_client = get_squad2_client() 
     control_file     = f"control/{tabela}/control_file.json"
     return container_client, control_file
 
 def ler_checkpoint(camada: str, tabela: str) -> set:
-    """
-    Lê o arquivo de controle em formato JSON da pasta control/
-    """
     container_client, control_file = get_control_path(tabela)
     processados                    = set()
-
     try:
         file_client = container_client.get_file_client(control_file)
         conteudo    = file_client.download_file().readall().decode("utf-8")
         dados       = json.loads(conteudo)
-        
         processados = set(dados.get("processed_snapshots", []))
         log.info(f"{len(processados)} snapshot(s) recuperados do JSON de controle.")
     except Exception:
         log.info(f"Nenhum controle JSON localizado em {control_file}. Iniciando carga limpa.")
-
     return processados
 
 def salvar_checkpoint(camada: str, tabela: str, processados: set) -> None:
-    """
-    Grava metadados e histórico estruturado em formato JSON dentro de control/
-    """
     container_client, control_file = get_control_path(tabela)
     file_client                       = container_client.get_file_client(control_file)
-    
     dados_controle = {
         "tabela": tabela,
         "camada": camada,
@@ -415,85 +306,44 @@ def salvar_checkpoint(camada: str, tabela: str, processados: set) -> None:
         "total_snapshots_processados": len(processados),
         "processed_snapshots": sorted(list(processados))
     }
-    
     conteudo = json.dumps(dados_controle, indent=4).encode("utf-8")
-
     try:
         file_client.get_file_properties()
         file_client.upload_data(conteudo, overwrite=True)
     except Exception:
         file_client.create_file()
         file_client.upload_data(conteudo, overwrite=True)
-
-    log.info(f"Governança unificada: Controle JSON atualizado em {control_file}")
+    log.info(f"Controle JSON atualizado em {control_file}")
 
 # ─────────────────────────────────────────────
 # FUNÇÕES — UTILITÁRIAS
 # ─────────────────────────────────────────────
 
 def get_snapshot_mais_recente(base_path: str = None) -> str:
-    """
-    Retorna o snapshot mais recente disponível no lake.
-    """
     snapshots = listar_snapshots(base_path)
     if not snapshots:
-        raise ValueError("Nenhum snapshot encontrado no lake.")
+        raise ValueError("Nenhum snapshot encontrado.")
     return sorted(snapshots)[-1]
 
 def log_inicio(notebook: str) -> datetime:
-    """Loga o início da execução de um notebook."""
     inicio = datetime.now()
-    log.info(f"{'='*50}")
-    log.info(f"INÍCIO: {notebook}")
-    log.info(f"Data  : {inicio.strftime('%Y-%m-%d %H:%M:%S')}")
-    log.info(f"{'='*50}")
+    log.info(f"{'='*50}\nINÍCIO: {notebook}\nData  : {inicio.strftime('%Y-%m-%d %H:%M:%S')}\n{'='*50}")
     return inicio
 
 def log_fim(notebook: str, inicio: datetime) -> None:
-    """Loga o fim da execução e o tempo total."""
     fim      = datetime.now()
     duracao  = (fim - inicio).seconds
-    log.info(f"{'='*50}")
-    log.info(f"FIM   : {notebook}")
-    log.info(f"Tempo : {duracao}s")
-    log.info(f"{'='*50}")
+    log.info(f"{'='*50}\nFIM   : {notebook}\nTempo : {duracao}s\n{'='*50}")
 
-# ─────────────────────────────────────────────
-# VALIDAÇÃO DO CARREGAMENTO
-# ─────────────────────────────────────────────
 def _validar_credenciais() -> None:
     credenciais = {
-        "ADLS_CLIENT_ID"      : ADLS_CLIENT_ID,
-        "ADLS_TENANT_ID"      : ADLS_TENANT_ID,
-        "ADLS_CLIENT_SECRET"  : ADLS_CLIENT_SECRET,
-        "ADLS_STORAGE_ACCOUNT": ADLS_STORAGE_ACCOUNT,
-        "ADLS_CONTAINER"      : ADLS_CONTAINER,
-        "SQL_HOST"            : SQL_HOST,
-        "SQL_DATABASE"        : SQL_DATABASE,
-        "SQL_USERNAME"        : SQL_USERNAME,
-        "SQL_PASSWORD"        : SQL_PASSWORD
+        "ADLS_CLIENT_ID": ADLS_CLIENT_ID, "ADLS_TENANT_ID": ADLS_TENANT_ID,
+        "ADLS_CLIENT_SECRET": ADLS_CLIENT_SECRET, "ADLS_STORAGE_ACCOUNT": ADLS_STORAGE_ACCOUNT,
+        "ADLS_CONTAINER": ADLS_CONTAINER, "SQL_HOST": SQL_HOST, "SQL_DATABASE": SQL_DATABASE
     }
-    todas_ok = True
     for nome, valor in credenciais.items():
         if not valor:
-            log.error(f"Credencial não encontrada: {nome}")
-            todas_ok = False
-
-    if todas_ok:
-        log.info("Helpers carregados! Todas as credenciais OK.")
-    else:
-        raise EnvironmentError(
-            "Credenciais ausentes. Verifique o arquivo .env"
-        )
+            raise EnvironmentError(f"Credencial ausente: {nome}")
+    log.info("Helpers carregados! Todas as credenciais OK.")
 
 _validar_credenciais()
-
-# COMMAND ----------
-
-try:
-    print("Iniciando a remoção da pasta...")
-    squad2_client = get_squad2_client()
-    squad2_client.delete_directory("ecommerce_categorias")
-    print("✅ Sucesso! A pasta da raiz foi eliminada.")
-except Exception as e:
-    print(f"❌ Erro: {str(e)}")
