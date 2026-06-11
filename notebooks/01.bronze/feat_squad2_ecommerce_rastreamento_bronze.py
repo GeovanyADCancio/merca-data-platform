@@ -59,7 +59,11 @@ service_client = DataLakeServiceClient(
     credential=credential,
 )
 
-file_system_client = service_client.get_file_system_client(file_system=container_raw)
+container_raw = "raw"
+container_squad = "squad2"
+
+file_system_client_raw = service_client.get_file_system_client(file_system=container_raw)
+file_system_client_squad = service_client.get_file_system_client(file_system=container_squad)
 
 storage_options = {
     "AZURE_STORAGE_ACCOUNT_NAME": storage_account_name,
@@ -68,7 +72,7 @@ storage_options = {
     "AZURE_CLIENT_SECRET": client_secret,
 }
 
-bronze_delta_path = f"az://{container_raw}/squad2/bronze/ecommerce_rastreamento"
+bronze_delta_path = f"az://{container_squad}/bronze/ecommerce_rastreamento"
 checkpoint_adls_path = f"control/bronze/{table_name}/checkpoint.json"
 
 print("raw_input_dir:", raw_input_dir)
@@ -79,7 +83,7 @@ print("checkpoint_adls_path:", checkpoint_adls_path)
 
 def carregar_checkpoint_bronze() -> dict:
     try:
-        file_client = file_system_client.get_file_client(checkpoint_adls_path)
+        file_client = file_system_client_squad.get_file_client(checkpoint_adls_path)
         conteudo = file_client.download_file().readall().decode("utf-8")
         return json.loads(conteudo)
     except Exception:
@@ -96,22 +100,22 @@ def salvar_checkpoint_bronze(checkpoint: dict):
     checkpoint["tabela"] = table_name
     checkpoint["ultima_execucao"] = datetime.now(timezone.utc).isoformat()
 
-    directory_client = file_system_client.get_directory_client(f"control/bronze/{table_name}")
+    directory_client = file_system_client_squad.get_directory_client(f"control/bronze/{table_name}")
     try:
         directory_client.create_directory()
     except Exception:
         pass
 
-    file_client = file_system_client.get_file_client(checkpoint_adls_path)
+    file_client = file_system_client_squad.get_file_client(checkpoint_adls_path)
     file_client.upload_data(
         json.dumps(checkpoint, indent=2, ensure_ascii=False),
         overwrite=True,
     )
-    print(f"Checkpoint salvo em: az://{container_raw}/{checkpoint_adls_path}")
+    print(f"Checkpoint salvo em: az://{container_squad}/{checkpoint_adls_path}")
 
 
 def ler_parquet_adls(caminho_arquivo: str) -> pd.DataFrame:
-    file_client = file_system_client.get_file_client(caminho_arquivo)
+    file_client = file_system_client_raw.get_file_client(caminho_arquivo)
     bytes_file = file_client.download_file().readall()
     table = pq.read_table(io.BytesIO(bytes_file))
     df = table.to_pandas()
@@ -136,7 +140,7 @@ def adicionar_metadados_bronze(df: pd.DataFrame, caminho_arquivo: str) -> pd.Dat
 # COMMAND ----------
 
 arquivos = []
-paths = file_system_client.get_paths(path=raw_input_dir, recursive=True)
+paths = file_system_client_raw.get_paths(path=raw_input_dir, recursive=True)
 
 for path in paths:
     if (

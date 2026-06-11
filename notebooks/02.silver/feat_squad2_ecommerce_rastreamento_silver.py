@@ -49,7 +49,11 @@ service_client = DataLakeServiceClient(
     credential=credential,
 )
 
-file_system_client = service_client.get_file_system_client(file_system=container_raw)
+container_squad = "squad2"
+
+file_system_client_squad = service_client.get_file_system_client(
+    file_system=container_squad
+)
 
 storage_options = {
     "AZURE_STORAGE_ACCOUNT_NAME": storage_account_name,
@@ -58,9 +62,9 @@ storage_options = {
     "AZURE_CLIENT_SECRET": client_secret,
 }
 
-bronze_delta_path = f"az://{container_raw}/squad2/bronze/ecommerce_rastreamento"
-silver_delta_path = f"az://{container_raw}/squad2/silver/ecommerce_rastreamento"
-quarantine_delta_path = f"az://{container_raw}/squad2/quarantine/ecommerce_rastreamento_entregas"
+bronze_delta_path = f"az://{container_squad}/bronze/ecommerce_rastreamento"
+silver_delta_path = f"az://{container_squad}/silver/ecommerce_rastreamento"
+quarantine_delta_path = f"az://{container_squad}/quarantine/ecommerce_rastreamento_entregas"
 checkpoint_adls_path = f"control/silver/{table_name}/checkpoint.json"
 
 print("bronze_delta_path:", bronze_delta_path)
@@ -72,7 +76,7 @@ print("checkpoint_adls_path:", checkpoint_adls_path)
 
 def carregar_checkpoint_silver() -> dict:
     try:
-        file_client = file_system_client.get_file_client(checkpoint_adls_path)
+        file_client = file_system_client_squad.get_file_client(checkpoint_adls_path)
         conteudo = file_client.download_file().readall().decode("utf-8")
         return json.loads(conteudo)
     except Exception:
@@ -88,18 +92,18 @@ def salvar_checkpoint_silver(checkpoint: dict):
     checkpoint["tabela"] = table_name
     checkpoint["ultima_execucao"] = datetime.now(timezone.utc).isoformat()
 
-    directory_client = file_system_client.get_directory_client(f"control/silver/{table_name}")
+    directory_client = file_system_client_squad.get_directory_client(f"control/silver/{table_name}")
     try:
         directory_client.create_directory()
     except Exception:
         pass
 
-    file_client = file_system_client.get_file_client(checkpoint_adls_path)
+    file_client = file_system_client_squad.get_file_client(checkpoint_adls_path)
     file_client.upload_data(
         json.dumps(checkpoint, indent=2, ensure_ascii=False),
         overwrite=True,
     )
-    print(f"Checkpoint salvo em: az://{container_raw}/{checkpoint_adls_path}")
+print(f"Checkpoint salvo em: az://{container_squad}/{checkpoint_adls_path}")
 
 
 def escrever_delta(path: str, df: pd.DataFrame, mode: str = "overwrite"):
@@ -115,9 +119,10 @@ def escrever_delta(path: str, df: pd.DataFrame, mode: str = "overwrite"):
 
 arquivos_bronze_delta = []
 
-paths = file_system_client.get_paths(
-    path="squad2/bronze/ecommerce_rastreamento",
+paths = file_system_client_squad.get_paths(
+    path="bronze/ecommerce_rastreamento",
     recursive=True
+
 )
 
 for path in paths:
@@ -133,7 +138,7 @@ print("Arquivos parquet da Bronze Delta:", len(arquivos_bronze_delta))
 lista_bronze = []
 
 for arquivo in arquivos_bronze_delta:
-    file_client = file_system_client.get_file_client(arquivo)
+    file_client = file_system_client_squad.get_file_client(arquivo)
     bytes_file = file_client.download_file().readall()
 
     table = pq.read_table(io.BytesIO(bytes_file))
@@ -277,16 +282,7 @@ print("Checkpoint Silver salvo com sucesso.")
 
 # COMMAND ----------
 
-file_client = file_system_client.get_file_client(
+file_client = file_system_client_squad.get_file_client(
     "control/silver/ecommerce_rastreamento/checkpoint.json"
 )
-
-print(file_client.download_file().readall().decode("utf-8"))
-
-# COMMAND ----------
-
-file_client = file_system_client.get_file_client(
-    "control/silver/ecommerce_rastreamento/checkpoint.json"
-)
-
 print(file_client.download_file().readall().decode("utf-8"))

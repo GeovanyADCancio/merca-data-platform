@@ -9,9 +9,15 @@
 
 # COMMAND ----------
 
-dbutils.notebook.run("../01.bronze/feat_squad2_ecommerce_rastreamento_bronze", timeout_seconds=0)
-dbutils.notebook.run("../02.silver/feat_squad2_ecommerce_rastreamento_silver", timeout_seconds=0)
-dbutils.notebook.run("../03.gold/feat_squad2_ecommerce_rastreamento_gold", timeout_seconds=0)
+etapas = [
+    "../01.bronze/feat_squad2_ecommerce_rastreamento_bronze",
+    "../02.silver/feat_squad2_ecommerce_rastreamento_silver",
+    "../03.gold/feat_squad2_ecommerce_rastreamento_gold",
+]
+
+for etapa in etapas:
+    print(f"Executando: {etapa}")
+    resultado = dbutils.notebook.run(etapa, timeout_seconds=0)
+    print(f"Concluido: {etapa} | retorno: {resultado}")
 
 print("Pipeline bronze -> silver -> gold finalizado.")
-

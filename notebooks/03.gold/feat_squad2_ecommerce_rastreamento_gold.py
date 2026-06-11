@@ -47,7 +47,11 @@ service_client = DataLakeServiceClient(
     credential=credential,
 )
 
-file_system_client = service_client.get_file_system_client(file_system=container_raw)
+container_squad = "squad2"
+
+file_system_client_squad = service_client.get_file_system_client(
+    file_system=container_squad
+)
 
 storage_options = {
     "AZURE_STORAGE_ACCOUNT_NAME": storage_account_name,
@@ -56,17 +60,20 @@ storage_options = {
     "AZURE_CLIENT_SECRET": client_secret,
 }
 
-silver_adls_dir = "squad2/silver/ecommerce_rastreamento"
-gold_base_path = f"az://{container_raw}/squad2/gold/ecommerce_rastreamento"
+silver_adls_dir = "silver/ecommerce_rastreamento"
+gold_base_path = f"az://{container_squad}/gold/ecommerce_rastreamento"
 
 print("silver_adls_dir:", silver_adls_dir)
 print("gold_base_path:", gold_base_path)
 
 # COMMAND ----------
 
-def ler_parquets_adls(diretorio: str) -> pd.DataFrame:
+def ler_parquets_adls(diretorio: str, client=None) -> pd.DataFrame:
+    if client is None:
+        client = file_system_client_squad
+
     arquivos = []
-    paths = file_system_client.get_paths(path=diretorio, recursive=True)
+    paths = client.get_paths(path=diretorio, recursive=True)
 
     for path in paths:
         if (
@@ -83,13 +90,12 @@ def ler_parquets_adls(diretorio: str) -> pd.DataFrame:
 
     lista = []
     for arquivo in arquivos:
-        file_client = file_system_client.get_file_client(arquivo)
+        file_client = client.get_file_client(arquivo)
         bytes_file = file_client.download_file().readall()
         table = pq.read_table(io.BytesIO(bytes_file))
         lista.append(table.to_pandas())
 
     return pd.concat(lista, ignore_index=True)
-
 
 def escrever_delta(path: str, df: pd.DataFrame, mode: str = "overwrite"):
     tabela_arrow = pa.Table.from_pandas(df, preserve_index=False)
@@ -106,7 +112,7 @@ def salvar_checkpoint_gold(nome_tabela: str, destino: str, registros: int, detal
     checkpoint = {
         "camada": "gold",
         "tabela": nome_tabela,
-        "origem": f"az://{container_raw}/{silver_adls_dir}",
+        "origem": f"az://{container_squad}/{silver_adls_dir}",
         "destino": destino,
         "registros_processados": int(registros),
         "ultima_execucao": datetime.now(timezone.utc).isoformat(),
@@ -115,18 +121,18 @@ def salvar_checkpoint_gold(nome_tabela: str, destino: str, registros: int, detal
         checkpoint.update(detalhes)
 
     checkpoint_path = f"control/gold/{nome_tabela}/checkpoint.json"
-    directory_client = file_system_client.get_directory_client(f"control/gold/{nome_tabela}")
+    directory_client = file_system_client_squad.get_directory_client(f"control/gold/{nome_tabela}")
     try:
         directory_client.create_directory()
     except Exception:
         pass
 
-    file_client = file_system_client.get_file_client(checkpoint_path)
+    file_client = file_system_client_squad.get_file_client(checkpoint_path)
     file_client.upload_data(
         json.dumps(checkpoint, indent=2, ensure_ascii=False),
         overwrite=True,
     )
-    print(f"Checkpoint salvo em: az://{container_raw}/{checkpoint_path}")
+    print(f"Checkpoint salvo em: az://{container_squad}/{checkpoint_path}")
 
 # COMMAND ----------
 
@@ -320,36 +326,12 @@ else:
 
 # COMMAND ----------
 
-def ler_parquets_adls(diretorio: str, client=None) -> pd.DataFrame:
-    if client is None:
-        client = file_system_client
+SQUAD2_CONTAINER = "squad2"
+TABELA_PEDIDOS = "ecommerce_pedidos"
 
-    arquivos = []
-    paths = client.get_paths(path=diretorio, recursive=True)
-
-    for path in paths:
-        if (
-            not path.is_directory
-            and path.name.endswith(".parquet")
-            and "_delta_log" not in path.name
-        ):
-            arquivos.append(path.name)
-
-    print(f"Arquivos parquet encontrados em {diretorio}: {len(arquivos)}")
-
-    if not arquivos:
-        raise ValueError(f"Nenhum parquet encontrado em {diretorio}")
-
-    lista = []
-    for arquivo in arquivos:
-        file_client = client.get_file_client(arquivo)
-        bytes_file = file_client.download_file().readall()
-        table = pq.read_table(io.BytesIO(bytes_file))
-        lista.append(table.to_pandas())
-
-    return pd.concat(lista, ignore_index=True)
-
-# COMMAND ----------
+pedidos_file_system_client = service_client.get_file_system_client(
+    file_system=SQUAD2_CONTAINER
+)
 
 df_pedidos = ler_parquets_adls(
     diretorio=f"silver/{TABELA_PEDIDOS}",
