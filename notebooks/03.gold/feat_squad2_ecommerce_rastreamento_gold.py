@@ -447,3 +447,61 @@ ids_pedidos = set(df_pedidos["id_pedido"].dropna().astype(int))
 print("IDs entregues no rastreamento:", len(ids_rastreamento))
 print("IDs na tabela pedidos:", len(ids_pedidos))
 print("IDs em comum:", len(ids_rastreamento.intersection(ids_pedidos)))
+
+# COMMAND ----------
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv("/Workspace/Users/kalitamariano01@gmail.com/merca-data-platform/.env", override=True)
+
+sql_host = os.getenv("SQL_HOST")
+sql_database = os.getenv("SQL_DATABASE")
+sql_username = os.getenv("SQL_USERNAME")
+sql_password = os.getenv("SQL_PASSWORD")
+
+print("sql_host:", sql_host)
+print("sql_database:", sql_database)
+print("sql_username:", sql_username)
+print("sql_password carregado:", sql_password is not None)
+
+# COMMAND ----------
+
+# -------------------------------------------------------------------------
+# # SINK 2: INGESTÃO NO SQL SERVER COM CRIAÇÃO E ALINHAMENTO AUTOMÁTICO
+def gravar_gold_sql_server(df: pd.DataFrame, nome_tabela: str, mode: str = "overwrite"):
+    if len(df) == 0:
+        print(f"Sem registros para gravar no SQL Server: squad2.{nome_tabela}")
+        return
+
+    (
+        spark.createDataFrame(df)
+        .write
+        .format("sqlserver")
+        .mode(mode)
+        .option("host", sql_host)
+        .option("port", "1433")
+        .option("database", sql_database)
+        .option("user", sql_username)
+        .option("password", sql_password)
+        .option("dbtable", f"squad2.{nome_tabela}")
+        .option("encrypt", "true")
+        .option("trustServerCertificate", "false")
+        .save()
+    )
+
+    print(f"Gold gravada no SQL Server: squad2.{nome_tabela}")
+
+# COMMAND ----------
+
+gravar_gold_sql_server(df_gold_status_diario, f"{table_name}_status_diario")
+gravar_gold_sql_server(df_gold_pedido_ultima_posicao, f"{table_name}_pedido_ultima_posicao")
+gravar_gold_sql_server(df_gold_saiu_entrega_2h, f"{table_name}_saiu_para_entrega_2h")
+gravar_gold_sql_server(df_alerta_entrega_duplicada, f"{table_name}_alerta_entrega_duplicada")
+gravar_gold_sql_server(df_gold_top3_transportadoras_micro_lote, f"{table_name}_top3_transportadoras_micro_lote")
+gravar_gold_sql_server(df_alerta_sem_evento_apos_coleta, f"{table_name}_alerta_sem_evento_apos_coleta")
+gravar_gold_sql_server(df_gold_sla_entrega, f"{table_name}_sla_entrega")
+
+# COMMAND ----------
+
+
