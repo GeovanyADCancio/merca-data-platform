@@ -274,3 +274,19 @@ checkpoint_silver["validacoes"] = [
 
 salvar_checkpoint_silver(checkpoint_silver)
 print("Checkpoint Silver salvo com sucesso.")
+
+# COMMAND ----------
+
+file_client = file_system_client.get_file_client(
+    "control/silver/ecommerce_rastreamento/checkpoint.json"
+)
+
+print(file_client.download_file().readall().decode("utf-8"))
+
+# COMMAND ----------
+
+file_client = file_system_client.get_file_client(
+    "control/silver/ecommerce_rastreamento/checkpoint.json"
+)
+
+print(file_client.download_file().readall().decode("utf-8"))
