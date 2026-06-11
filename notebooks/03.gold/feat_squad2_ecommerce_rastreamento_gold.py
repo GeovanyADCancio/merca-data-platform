@@ -207,6 +207,7 @@ display(spark.createDataFrame(df_gold_pedido_ultima_posicao.head(20)))
 
 # COMMAND ----------
 
+## Regra 6 - KPI: pedidos que entraram em "saiu para entrega" nas ultimas 2 horas
 df_gold_saiu_entrega_2h = pd.DataFrame(
     [{
         "qtd_pedidos_saiu_para_entrega_2h": df_silver[
@@ -225,6 +226,7 @@ display(spark.createDataFrame(df_gold_saiu_entrega_2h))
 
 # COMMAND ----------
 
+## Regra 8 - Alerta: mesmo pedido com evento "entregue" mais de uma vez
 df_alerta_entrega_duplicada = (
     df_silver[df_silver["status_entrega_normalizado"] == "entregue"]
     .groupby("id_pedido_ecommerce", dropna=False)
@@ -251,6 +253,7 @@ else:
 
 # COMMAND ----------
 
+## Regra 9 - KPI: top 3 transportadoras com mais eventos no micro-lote atual
 ultima_ingestao_bronze = df_silver["bronze_ingested_at"].max()
 df_micro_lote_atual = df_silver[df_silver["bronze_ingested_at"] == ultima_ingestao_bronze].copy()
 
@@ -286,7 +289,7 @@ df_eventos_pedido = (
     )
     .reset_index()
 )
-
+## Regra 10 - Alerta: pedido sem novo evento por mais de 3 dias apos "coletado"
 df_alerta_sem_evento_apos_coleta = df_eventos_pedido[
     df_eventos_pedido["dt_ultima_coleta"].notna()
     & (df_eventos_pedido["dt_ultimo_evento"] == df_eventos_pedido["dt_ultima_coleta"])
@@ -317,27 +320,96 @@ else:
 
 # COMMAND ----------
 
-# Regra 7: SLA depende da Silver de pedidos com `dt_pedido`.
-# Se a tabela de pedidos existir no metastore, calcula o percentual. Caso contrario,
-# grava uma linha informando pendencia para nao bloquear a Gold de rastreamento.
+def ler_parquets_adls(diretorio: str, client=None) -> pd.DataFrame:
+    if client is None:
+        client = file_system_client
+
+    arquivos = []
+    paths = client.get_paths(path=diretorio, recursive=True)
+
+    for path in paths:
+        if (
+            not path.is_directory
+            and path.name.endswith(".parquet")
+            and "_delta_log" not in path.name
+        ):
+            arquivos.append(path.name)
+
+    print(f"Arquivos parquet encontrados em {diretorio}: {len(arquivos)}")
+
+    if not arquivos:
+        raise ValueError(f"Nenhum parquet encontrado em {diretorio}")
+
+    lista = []
+    for arquivo in arquivos:
+        file_client = client.get_file_client(arquivo)
+        bytes_file = file_client.download_file().readall()
+        table = pq.read_table(io.BytesIO(bytes_file))
+        lista.append(table.to_pandas())
+
+    return pd.concat(lista, ignore_index=True)
+
+# COMMAND ----------
+
+df_pedidos = ler_parquets_adls(
+    diretorio=f"silver/{TABELA_PEDIDOS}",
+    client=pedidos_file_system_client
+)
+
+# COMMAND ----------
+
+# Regra 7 - KPI: percentual de pedidos entregues no prazo
+# SLA = 7 dias
+# Cruzamento:
+# rastreamento.id_pedido_ecommerce = pedidos.id_pedido
+
 try:
-    if spark.catalog.tableExists(pedidos_silver_table):
-        df_pedidos = spark.table(pedidos_silver_table).select("id_pedido_ecommerce", "dt_pedido").toPandas()
-        df_pedidos["dt_pedido"] = pd.to_datetime(df_pedidos["dt_pedido"], errors="coerce")
+    df_pedidos["dt_pedido"] = pd.to_datetime(
+        df_pedidos["dt_pedido"],
+        errors="coerce"
+    )
 
-        df_entregues = df_silver[df_silver["status_entrega_normalizado"] == "entregue"].copy()
-        df_sla_base = df_entregues.merge(df_pedidos, on="id_pedido_ecommerce", how="inner")
-        df_sla_base["dias_ate_entrega"] = (df_sla_base["dt_evento"] - df_sla_base["dt_pedido"]).dt.days
+    df_pedidos["id_pedido"] = pd.to_numeric(
+        df_pedidos["id_pedido"],
+        errors="coerce"
+    )
 
-        qtd_entregues = df_sla_base["id_pedido_ecommerce"].nunique()
-        qtd_no_prazo = df_sla_base[df_sla_base["dias_ate_entrega"] <= sla_entrega_dias]["id_pedido_ecommerce"].nunique()
-        percentual = round((100.0 * qtd_no_prazo / qtd_entregues), 2) if qtd_entregues else 0.0
-        status_sla = "calculado"
+    df_entregues = df_silver[
+        df_silver["status_entrega_normalizado"] == "entregue"
+    ].copy()
+
+    df_entregues["id_pedido_ecommerce"] = pd.to_numeric(
+        df_entregues["id_pedido_ecommerce"],
+        errors="coerce"
+    )
+
+    df_sla_base = df_entregues.merge(
+        df_pedidos[["id_pedido", "dt_pedido"]],
+        left_on="id_pedido_ecommerce",
+        right_on="id_pedido",
+        how="inner"
+    )
+
+    df_sla_base["dias_ate_entrega"] = (
+        df_sla_base["dt_evento"] - df_sla_base["dt_pedido"]
+    ).dt.days
+
+    qtd_entregues = df_sla_base["id_pedido_ecommerce"].nunique()
+
+    qtd_no_prazo = df_sla_base[
+        df_sla_base["dias_ate_entrega"] <= sla_entrega_dias
+    ]["id_pedido_ecommerce"].nunique()
+
+    percentual = round(
+        (100.0 * qtd_no_prazo / qtd_entregues),
+        2
+    ) if qtd_entregues else 0.0
+
+    if qtd_entregues == 0:
+        status_sla = "calculado_sem_pedidos_entregues"
     else:
-        qtd_entregues = 0
-        qtd_no_prazo = 0
-        percentual = 0.0
-        status_sla = f"pendente: tabela {pedidos_silver_table} nao encontrada"
+        status_sla = "calculado"
+
 except Exception as erro_sla:
     qtd_entregues = 0
     qtd_no_prazo = 0
@@ -355,7 +427,9 @@ df_gold_sla_entrega = pd.DataFrame(
 )
 
 sla_entrega_path = gold_base_path + "/sla_entrega"
+
 escrever_delta(sla_entrega_path, df_gold_sla_entrega)
+
 salvar_checkpoint_gold(
     f"{table_name}_sla_entrega",
     sla_entrega_path,
@@ -366,3 +440,28 @@ salvar_checkpoint_gold(
 display(spark.createDataFrame(df_gold_sla_entrega))
 
 print("Gold finalizada com sucesso.")
+
+# COMMAND ----------
+
+print(df_pedidos.columns.tolist())
+
+# COMMAND ----------
+
+df_silver["status_entrega_normalizado"].value_counts()
+
+# COMMAND ----------
+
+df_entregues = df_silver[
+    df_silver["status_entrega_normalizado"] == "entregue"
+].copy()
+
+print("Entregues no rastreamento:", len(df_entregues))
+
+# COMMAND ----------
+
+ids_rastreamento = set(df_entregues["id_pedido_ecommerce"].dropna().astype(int))
+ids_pedidos = set(df_pedidos["id_pedido"].dropna().astype(int))
+
+print("IDs entregues no rastreamento:", len(ids_rastreamento))
+print("IDs na tabela pedidos:", len(ids_pedidos))
+print("IDs em comum:", len(ids_rastreamento.intersection(ids_pedidos)))
