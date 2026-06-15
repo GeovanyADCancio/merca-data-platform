@@ -12,7 +12,16 @@
 # ///
 # MAGIC %md
 # MAGIC # Gold - ecommerce_rastreamento
-# MAGIC Cria KPIs e alertas de rastreamento lendo a Silver com Azure SDK/PyArrow e gravando Delta com `deltalake`.
+# MAGIC
+# MAGIC Este notebook gera as tabelas analíticas da camada Gold e publica os resultados no SQL Server.
+# MAGIC
+# MAGIC Regras/KPIs implementados:
+# MAGIC - Regra 6: KPI de pedidos que saíram para entrega nas últimas 2 horas.
+# MAGIC - Regra 7: KPI de percentual de pedidos entregues dentro do SLA.
+# MAGIC - Regra 8: alerta de entrega duplicada por pedido.
+# MAGIC - Regra 9: top 3 transportadoras do micro-lote.
+# MAGIC - Regra 10: alerta de pedido sem evento após coleta.
+# MAGIC - Gravação dos resultados no Blob e no SQL Server.
 
 # COMMAND ----------
 

@@ -13,7 +13,16 @@
 # ///
 # MAGIC %md
 # MAGIC # Silver - ecommerce_rastreamento
-# MAGIC Le a Bronze Delta com `deltalake`, aplica regras de qualidade da Kalita, grava Silver e Quarentena em Delta.
+# MAGIC
+# MAGIC Este notebook aplica validações e padronizações nos dados de rastreamento.
+# MAGIC
+# MAGIC Regras implementadas:
+# MAGIC - Validar schema obrigatório da tabela.
+# MAGIC - Validar status_entrega conforme fluxo logístico permitido.
+# MAGIC - Remover ou separar registros com dt_evento nula ou futura.
+# MAGIC - Deduplicar registros por id_rastreamento.
+# MAGIC - Validar id_pedido_ecommerce com a base de pedidos quando disponível.
+# MAGIC - Enviar registros inválidos para quarentena.
 
 # COMMAND ----------
 
