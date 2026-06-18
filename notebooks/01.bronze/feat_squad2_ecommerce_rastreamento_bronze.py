@@ -12,23 +12,53 @@
 # ]
 # ///
 # MAGIC %md
-# MAGIC ### Ingestão Bronze — ecommerce_rastreamento
+# MAGIC # Bronze - ecommerce_rastreamento
 # MAGIC
-# MAGIC **Objetivo:** ler micro-lotes `.parquet` do container `raw`, adicionar colunas de auditoria e salvar os dados em formato Delta na camada Bronze do container da Squad 2.
+# MAGIC **Responsável:** Kálita Ribeiro Boni  
+# MAGIC **Data da ingestão/processamento:** 18/06/2026  
+# MAGIC **Camada:** Bronze  
+# MAGIC **Tabela:** ecommerce_rastreamento  
 # MAGIC
-# MAGIC **Regras atendidas:**
+# MAGIC ### Origem e destino
 # MAGIC
-# MAGIC - Leitura dos arquivos em `raw/real-time-data/`;
-# MAGIC - Adição da coluna `bronze_ingested_at`;
-# MAGIC - Adição da coluna `bronze_source_file`;
-# MAGIC - Preservação das colunas de negócio, sem transformação na Bronze;
-# MAGIC - Escrita dos dados em formato Delta;
-# MAGIC - Particionamento por ano, mês, dia e hora de ingestão;
-# MAGIC - Controle de arquivos processados via checkpoint JSON em `control/bronze/ecommerce_rastreamento/checkpoint.json`.
+# MAGIC | Item | Valor |
+# MAGIC |---|---|
+# MAGIC | **Origem** | `raw/real-time-data` |
+# MAGIC | **Destino** | `squad2/bronze/ecommerce_rastreamento` |
+# MAGIC | **Control** | `squad2/control/bronze/ecommerce_rastreamento/checkpoint.json` |
+# MAGIC
+# MAGIC ### Objetivo
+# MAGIC
+# MAGIC Realizar a ingestão incremental dos arquivos parquet da camada raw para a camada Bronze, adicionando metadados de auditoria e mantendo os dados de negócio sem transformação.
+# MAGIC
+# MAGIC ### Regras/objetivos implementados
+# MAGIC
+# MAGIC - Leitura dos arquivos parquet da origem `raw/real-time-data`.
+# MAGIC - Controle de arquivos já processados via checkpoint JSON.
+# MAGIC - Processamento apenas dos arquivos ainda não registrados no checkpoint.
+# MAGIC - Adição da coluna `bronze_ingested_at`.
+# MAGIC - Adição da coluna `bronze_source_file`.
+# MAGIC - Preservação das colunas de negócio sem transformação.
+# MAGIC - Escrita dos dados em formato Delta na camada Bronze.
+# MAGIC - Particionamento por ano, mês, dia e hora de ingestão.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Instalação das dependências
+# MAGIC
+# MAGIC Instala as bibliotecas necessárias para autenticação no Azure, acesso ao ADLS Gen2, leitura de arquivos Parquet, manipulação de dados com Pandas e escrita em Delta Lake.
 
 # COMMAND ----------
 
 # MAGIC %pip install azure-identity azure-storage-file-datalake deltalake pyarrow pandas
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Carregamento das configurações do projeto
+# MAGIC
+# MAGIC Executa o notebook de configuração da Squad 2, responsável por disponibilizar variáveis, credenciais, caminhos e funções auxiliares utilizadas neste pipeline.
 
 # COMMAND ----------
 
@@ -45,6 +75,13 @@ import io
 import json
 import pandas as pd
 import pyarrow.parquet as pq
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ###  Conexão com o Azure Data Lake Storage
+# MAGIC
+# MAGIC Cria a autenticação com o Azure e instancia os clientes de acesso aos containers `raw` e `squad2`, que serão utilizados para leitura dos arquivos de origem e escrita dos dados processados..
 
 # COMMAND ----------
 
@@ -73,11 +110,19 @@ storage_options = {
 }
 
 bronze_delta_path = f"az://{container_squad}/bronze/ecommerce_rastreamento"
+#Definindo o checkpoint(Para evitar processar tudo de novo.)
 checkpoint_adls_path = f"control/bronze/{table_name}/checkpoint.json"
 
 print("raw_input_dir:", raw_input_dir)
 print("bronze_delta_path:", bronze_delta_path)
 print("checkpoint_adls_path:", checkpoint_adls_path)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ###  Funções auxiliares do pipeline Bronze
+# MAGIC
+# MAGIC Define funções para leitura e gravação do checkpoint, leitura dos arquivos Parquet no ADLS e inclusão dos metadados de ingestão da camada Bronze.
 
 # COMMAND ----------
 
@@ -126,7 +171,7 @@ def ler_parquet_adls(caminho_arquivo: str) -> pd.DataFrame:
 
     return df
 
-
+#Adicionar metadados Bronze
 def adicionar_metadados_bronze(df: pd.DataFrame, caminho_arquivo: str) -> pd.DataFrame:
     agora = datetime.now(timezone.utc).replace(tzinfo=None)
     df["bronze_ingested_at"] = agora
@@ -138,6 +183,18 @@ def adicionar_metadados_bronze(df: pd.DataFrame, caminho_arquivo: str) -> pd.Dat
     return df
 
 # COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Identificação de arquivos novos
+# MAGIC
+# MAGIC Lista os arquivos `.parquet` da tabela `ecommerce_rastreamento` no container `raw`, compara com o checkpoint da Bronze e seleciona apenas os arquivos ainda não processados.
+
+# COMMAND ----------
+
+## Busca arquivos de ecommerce_rastreamento no RAW,
+# compara com o checkpoint da Bronze e identifica
+# apenas os arquivos ainda não processados.
+
 
 arquivos = []
 paths = file_system_client_raw.get_paths(path=raw_input_dir, recursive=True)
@@ -169,6 +226,13 @@ if not arquivos_novos:
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ### Leitura, enriquecimento e validação do micro-lote
+# MAGIC
+# MAGIC Lê os arquivos novos, adiciona metadados de auditoria, consolida os dados em um único DataFrame e valida a presença das colunas obrigatórias da tabela.
+
+# COMMAND ----------
+
 lista_dfs = []
 
 for arquivo in arquivos_novos:
@@ -188,6 +252,14 @@ display(spark.createDataFrame(df_bronze_final).limit(20))
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ### Escrita dos dados na camada Bronze
+# MAGIC
+# MAGIC Converte o DataFrame final para formato Arrow e grava os dados em Delta Lake no container da Squad 2, utilizando modo append e particionamento por data e hora de ingestão.
+
+# COMMAND ----------
+
+# DBTITLE 1,Gravação da camada Bronze (Delta Lake)
 import pyarrow as pa
 
 tabela_arrow = pa.Table.from_pandas(df_bronze_final, preserve_index=False)
@@ -210,6 +282,7 @@ print("Delta:", bronze_delta_path)
 
 # COMMAND ----------
 
+# DBTITLE 1,Atualização do controle de processamento (Checkpoint)
 dt = DeltaTable(bronze_delta_path, storage_options=storage_options)
 print("Versao Delta:", dt.version())
 

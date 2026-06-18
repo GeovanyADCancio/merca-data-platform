@@ -13,15 +13,32 @@
 # MAGIC %md
 # MAGIC # Gold - ecommerce_rastreamento
 # MAGIC
-# MAGIC Este notebook gera as tabelas analíticas da camada Gold e publica os resultados no SQL Server.
+# MAGIC **Responsável:** Kálita Ribeiro Boni  
+# MAGIC **Data da ingestão/processamento:** 18/06/2026  
+# MAGIC **Camada:** Gold  
+# MAGIC **Tabela:** ecommerce_rastreamento  
 # MAGIC
-# MAGIC Regras/KPIs implementados:
-# MAGIC - Regra 6: KPI de pedidos que saíram para entrega nas últimas 2 horas.
-# MAGIC - Regra 7: KPI de percentual de pedidos entregues dentro do SLA.
-# MAGIC - Regra 8: alerta de entrega duplicada por pedido.
-# MAGIC - Regra 9: top 3 transportadoras do micro-lote.
-# MAGIC - Regra 10: alerta de pedido sem evento após coleta.
-# MAGIC - Gravação dos resultados no Blob e no SQL Server.
+# MAGIC ### Origem e destino
+# MAGIC
+# MAGIC | Item | Valor |
+# MAGIC |---|---|
+# MAGIC | **Origem** | `squad2/silver/ecommerce_rastreamento` |
+# MAGIC | **Destino** | `squad2/gold/ecommerce_rastreamento` |
+# MAGIC | **control** | `squad2/control/gold/{nome_tabela}/checkpoint.json` |
+# MAGIC | **Publicação SQL Server** | Schema `squad2` |
+# MAGIC
+# MAGIC ### Objetivo
+# MAGIC
+# MAGIC Gerar os indicadores e alertas analíticos da camada Gold a partir dos dados tratados na camada Silver, disponibilizando os resultados no Blob da Squad 2 e no SQL Server para consumo analítico.
+# MAGIC
+# MAGIC ### Regras/KPIs implementados
+# MAGIC
+# MAGIC - **Regra 6:** KPI de pedidos que saíram para entrega nas últimas 2 horas.
+# MAGIC - **Regra 7:** KPI de percentual de pedidos entregues dentro do SLA.
+# MAGIC - **Regra 8:** Alerta de entrega duplicada por pedido.
+# MAGIC - **Regra 9:** Top 3 transportadoras do micro-lote.
+# MAGIC - **Regra 10:** Alerta de pedido sem evento após coleta.
+# MAGIC - **Publicação:** Gravação dos resultados no Blob e no SQL Server..
 
 # COMMAND ----------
 
@@ -513,4 +530,459 @@ gravar_gold_sql_server(df_gold_sla_entrega, f"{table_name}_sla_entrega")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC
+# MAGIC
+# MAGIC
+# MAGIC ##  Insights gráficos da camada Gold
+# MAGIC
+# MAGIC  Esta seção apresenta gráficos de apoio para análise dos KPIs e alertas gerados na camada Gold, com foco na quantidade de ocorrências por problema conforme as regras da planilha.
+# MAGIC
+# MAGIC
 
+# COMMAND ----------
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+def exibir_grafico_barras(df: pd.DataFrame, coluna_x: str, coluna_y: str, titulo: str, eixo_x: str, eixo_y: str):
+    if df.empty:
+        print(f"Sem dados para exibir: {titulo}")
+        return
+
+    plt.figure(figsize=(10, 5))
+    plt.bar(df[coluna_x].astype(str), df[coluna_y])
+    plt.title(titulo)
+    plt.xlabel(eixo_x)
+    plt.ylabel(eixo_y)
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.show()
+
+# COMMAND ----------
+
+# DBTITLE 1,Consolida a quantidade de ocorrências encontradas nas regras de alerta e validação da camada GoldConsolida a quantidade de ocorrências encontradas nas regras de alerta e validação da camada Gold
+def exibir_grafico_barras_insights(df: pd.DataFrame, titulo: str):
+    if df.empty:
+        print(f"Sem dados para exibir: {titulo}")
+        return
+
+    df_plot = df.copy()
+    df_plot["codigo"] = df_plot["regra"].str.replace("Regra ", "R", regex=False)
+
+    plt.figure(figsize=(8, 4))
+
+    barras = plt.bar(
+        df_plot["codigo"],
+        df_plot["quantidade"],
+        color=["#4C78A8", "#F58518", "#54A24B"][:len(df_plot)]
+    )
+
+    plt.ylim(0, max(df_plot["quantidade"].max() + 1, 1))
+    plt.title(titulo)
+    plt.xlabel("Regra")
+    plt.ylabel("Quantidade")
+
+    for barra, valor in zip(barras, df_plot["quantidade"]):
+        plt.text(
+            barra.get_x() + barra.get_width() / 2,
+            valor + 0.03,
+            str(int(valor)),
+            ha="center"
+        )
+
+    plt.tight_layout()
+    plt.show()
+
+    print("Legenda:")
+    for _, linha in df_plot.iterrows():
+        print(f"{linha['codigo']} - {linha['problema']}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Este gráfico apresenta a quantidade de eventos por status de entrega. Todos os status previstos na regra são exibidos, mesmo quando a quantidade encontrada é zero.
+
+# COMMAND ----------
+
+# DBTITLE 1,Este gráfico apresenta a quantidade de eventos por status de entrega. Todos os status previstos na regra são exibidos, mesmo quando a quantidade encontrada é zero.
+status_mapa = {
+    "aguardando coleta": "Aguard. coleta",
+    "saiu para entrega": "Saiu entrega",
+    "em transporte": "Transporte",
+    "entregue": "Entregue",
+    "coletado": "Coletado",
+}
+
+df_status_base = (
+    df_silver.groupby("status_entrega_normalizado", dropna=False)
+    .size()
+    .reset_index(name="quantidade")
+)
+
+df_status_todos = pd.DataFrame(
+    {
+        "status_entrega_normalizado": list(status_mapa.keys()),
+        "status_curto": list(status_mapa.values()),
+    }
+)
+
+df_status_plot = df_status_todos.merge(
+    df_status_base,
+    on="status_entrega_normalizado",
+    how="left"
+)
+
+df_status_plot["quantidade"] = df_status_plot["quantidade"].fillna(0).astype(int)
+
+cores = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2"]
+
+plt.figure(figsize=(10, 5))
+
+barras = plt.bar(
+    df_status_plot["status_curto"],
+    df_status_plot["quantidade"],
+    color=cores
+)
+
+maior_valor = df_status_plot["quantidade"].max()
+plt.ylim(0, max(maior_valor + 50, 1))
+
+plt.title("Quantidade de eventos por status de entrega")
+plt.xlabel("Status de entrega")
+plt.ylabel("Quantidade")
+plt.xticks(rotation=0)
+
+for barra, valor in zip(barras, df_status_plot["quantidade"]):
+    plt.text(
+        barra.get_x() + barra.get_width() / 2,
+        valor + max(maior_valor * 0.01, 0.05),
+        str(int(valor)),
+        ha="center",
+        va="bottom",
+        fontsize=9,
+    )
+
+legenda = [
+    Patch(
+        facecolor=cor,
+        label=f"{curto} = {completo}"
+    )
+    for cor, curto, completo in zip(
+        cores,
+        df_status_plot["status_curto"],
+        df_status_plot["status_entrega_normalizado"],
+    )
+]
+
+plt.legend(
+    handles=legenda,
+    title="Legenda",
+    bbox_to_anchor=(1.02, 1),
+    loc="upper left"
+)
+
+plt.tight_layout()
+plt.show()
+
+display(spark.createDataFrame(df_status_plot))
+
+# COMMAND ----------
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+df_saiu_entrega = df_silver[
+    df_silver["status_entrega_normalizado"] == "saiu para entrega"
+].copy()
+
+df_saiu_entrega["horas_desde_evento"] = (
+    (agora - df_saiu_entrega["dt_evento"]).dt.total_seconds() / 3600
+)
+
+ids_ate_2h = set(
+    df_saiu_entrega[
+        df_saiu_entrega["horas_desde_evento"] <= 2
+    ]["id_pedido_ecommerce"].dropna()
+)
+
+ids_2h_8h = set(
+    df_saiu_entrega[
+        (df_saiu_entrega["horas_desde_evento"] > 2)
+        & (df_saiu_entrega["horas_desde_evento"] <= 8)
+    ]["id_pedido_ecommerce"].dropna()
+)
+
+ids_8h_24h = set(
+    df_saiu_entrega[
+        (df_saiu_entrega["horas_desde_evento"] > 8)
+        & (df_saiu_entrega["horas_desde_evento"] <= 24)
+    ]["id_pedido_ecommerce"].dropna()
+)
+
+ids_acima_24h = set(
+    df_saiu_entrega[
+        df_saiu_entrega["horas_desde_evento"] > 24
+    ]["id_pedido_ecommerce"].dropna()
+)
+
+ids_com_saida = (
+    ids_ate_2h
+    | ids_2h_8h
+    | ids_8h_24h
+    | ids_acima_24h
+)
+
+ids_total = set(df_silver["id_pedido_ecommerce"].dropna())
+ids_sem_saida = ids_total - ids_com_saida
+
+df_grafico_saida_entrega_faixas = pd.DataFrame(
+    [
+        {
+            "faixa": "Até 2h",
+            "descricao": "Pedidos com saída para entrega registrada nas últimas 2 horas",
+            "quantidade": len(ids_ate_2h),
+        },
+        {
+            "faixa": "2h a 8h",
+            "descricao": "Pedidos com saída para entrega registrada entre 2 e 8 horas",
+            "quantidade": len(ids_2h_8h),
+        },
+        {
+            "faixa": "8h a 24h",
+            "descricao": "Pedidos com saída para entrega registrada entre 8 e 24 horas",
+            "quantidade": len(ids_8h_24h),
+        },
+        {
+            "faixa": "Acima de 24h",
+            "descricao": "Pedidos com saída para entrega registrada há mais de 24 horas",
+            "quantidade": len(ids_acima_24h),
+        },
+        {
+            "faixa": "Sem saída registrada",
+            "descricao": "Pedidos que ainda não possuem evento de saída para entrega",
+            "quantidade": len(ids_sem_saida),
+        },
+    ]
+)
+
+display(spark.createDataFrame(df_grafico_saida_entrega_faixas))
+
+cores = ["#4C78A8", "#72B7B2", "#F58518", "#E45756", "#BAB0AC"]
+
+plt.figure(figsize=(10, 6))
+
+barras = plt.bar(
+    df_grafico_saida_entrega_faixas["faixa"],
+    df_grafico_saida_entrega_faixas["quantidade"],
+    color=cores,
+    width=0.55,
+)
+
+maior_valor = df_grafico_saida_entrega_faixas["quantidade"].max()
+plt.ylim(0, max(maior_valor + max(maior_valor * 0.15, 1), 1))
+
+plt.title("Distribuição de pedidos por tempo desde saída para entrega")
+plt.xlabel("Faixa de tempo")
+plt.ylabel("Quantidade de pedidos")
+plt.xticks(rotation=0)
+
+for barra, valor in zip(barras, df_grafico_saida_entrega_faixas["quantidade"]):
+    plt.text(
+        barra.get_x() + barra.get_width() / 2,
+        valor + max(maior_valor * 0.02, 0.05),
+        str(int(valor)),
+        ha="center",
+        va="bottom",
+        fontsize=10,
+    )
+
+legenda = [
+    Patch(
+        facecolor=cor,
+        label=f"{linha['faixa']} = {linha['descricao']}"
+    )
+    for cor, (_, linha) in zip(cores, df_grafico_saida_entrega_faixas.iterrows())
+]
+
+plt.legend(
+    handles=legenda,
+    title="Legenda",
+    loc="upper center",
+    bbox_to_anchor=(0.5, -0.18),
+    ncol=1,
+    frameon=True,
+)
+
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+qtd_fora_sla = max(int(qtd_entregues) - int(qtd_no_prazo), 0)
+                   
+df_grafico_sla = pd.DataFrame(
+    [
+        {
+            "situacao": "No prazo",
+            "descricao": "Pedidos entregues dentro do SLA de 7 dias",
+            "quantidade": int(qtd_no_prazo),
+        },
+        {
+            "situacao": "Fora do prazo",
+            "descricao": "Pedidos entregues acima do SLA de 7 dias",
+            "quantidade": int(qtd_fora_sla),
+        },
+    ]
+)
+
+display(spark.createDataFrame(df_grafico_sla))
+
+cores = ["#2E7D32", "#C62828"]
+
+plt.figure(figsize=(8, 5))
+
+barras = plt.bar(
+    df_grafico_sla["situacao"],
+    df_grafico_sla["quantidade"],
+    color=cores,
+    width=0.45,
+)
+
+maior_valor = df_grafico_sla["quantidade"].max()
+plt.ylim(0, max(maior_valor + max(maior_valor * 0.15, 1), 1))
+
+plt.title("SLA de entrega - pedidos no prazo x fora do prazo")
+plt.xlabel("Situação do SLA")
+plt.ylabel("Quantidade de pedidos")
+plt.xticks(rotation=0)
+
+for barra, valor in zip(barras, df_grafico_sla["quantidade"]):
+    plt.text(
+        barra.get_x() + barra.get_width() / 2,
+        valor + max(maior_valor * 0.02, 0.03),
+        str(int(valor)),
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        fontweight="bold",
+    )
+
+if int(qtd_entregues) == 0:
+    plt.text(
+        0.5,
+        0.55,
+        "Nenhum pedido com status entregue foi encontrado\npara cálculo do SLA",
+        transform=plt.gca().transAxes,
+        ha="center",
+        va="center",
+        fontsize=11,
+        color="#555555",
+        bbox=dict(boxstyle="round,pad=0.4", facecolor="#F5F5F5", edgecolor="#CCCCCC"),
+    )
+
+legenda = [
+    Patch(
+        facecolor=cor,
+        label=f"{linha['situacao']} = {linha['descricao']}"
+    )
+    for cor, (_, linha) in zip(cores, df_grafico_sla.iterrows())
+]
+
+plt.legend(
+    handles=legenda,
+    title="Legenda",
+    loc="upper center",
+    bbox_to_anchor=(0.5, -0.18),
+    ncol=1,
+    frameon=True,
+)
+
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+qtd_alerta_sem_evento = int(len(df_alerta_sem_evento_apos_coleta))
+
+df_grafico_sem_evento = pd.DataFrame(
+    [
+        {
+            "situacao": "Alerta",
+            "descricao": "Pedidos com mais de 3 dias sem novo evento após coleta",
+            "quantidade": qtd_alerta_sem_evento,
+        }
+    ]
+)
+
+display(spark.createDataFrame(df_grafico_sem_evento))
+
+cor_alerta = "#C62828"
+
+plt.figure(figsize=(7, 5))
+
+barras = plt.bar(
+    df_grafico_sem_evento["situacao"],
+    df_grafico_sem_evento["quantidade"],
+    color=[cor_alerta],
+    width=0.35,
+)
+
+maior_valor = df_grafico_sem_evento["quantidade"].max()
+plt.ylim(0, max(maior_valor + max(maior_valor * 0.15, 1), 1))
+
+plt.title("Regra 10 - Pedidos sem evento após coleta")
+plt.xlabel("Situação")
+plt.ylabel("Quantidade de alertas")
+plt.xticks(rotation=0)
+
+for barra, valor in zip(barras, df_grafico_sem_evento["quantidade"]):
+    plt.text(
+        barra.get_x() + barra.get_width() / 2,
+        valor + max(maior_valor * 0.02, 0.03),
+        str(int(valor)),
+        ha="center",
+        va="bottom",
+        fontsize=11,
+        fontweight="bold",
+    )
+
+if qtd_alerta_sem_evento == 0:
+    plt.text(
+        0.5,
+        0.55,
+        "Nenhum alerta encontrado para esta regra",
+        transform=plt.gca().transAxes,
+        ha="center",
+        va="center",
+        fontsize=11,
+        color="#555555",
+        bbox=dict(
+            boxstyle="round,pad=0.4",
+            facecolor="#F5F5F5",
+            edgecolor="#CCCCCC",
+        ),
+    )
+
+plt.legend(
+    handles=[
+        Patch(
+            facecolor=cor_alerta,
+            label="Alerta = pedidos com mais de 3 dias sem novo evento após coleta"
+        )
+    ],
+    title="Legenda",
+    loc="upper center",
+    bbox_to_anchor=(0.5, -0.18),
+    frameon=True,
+)
+
+plt.tight_layout()
+plt.show()

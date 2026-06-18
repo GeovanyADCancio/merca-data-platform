@@ -14,14 +14,32 @@
 # MAGIC %md
 # MAGIC # Silver - ecommerce_rastreamento
 # MAGIC
-# MAGIC Este notebook aplica validações e padronizações nos dados de rastreamento.
 # MAGIC
-# MAGIC Regras implementadas:
+# MAGIC **Responsável:** Kálita Ribeiro Boni  
+# MAGIC **Data da ingestão/processamento:** 18/06/2026  
+# MAGIC **Camada:** Silver  
+# MAGIC **Tabela:** ecommerce_rastreamento  
+# MAGIC
+# MAGIC ### Origem e destino
+# MAGIC
+# MAGIC | Item | Valor |
+# MAGIC |---|---|
+# MAGIC | **Origem** | `squad2/bronze/ecommerce_rastreamento` |
+# MAGIC | **Destino** | `squad2/silver/ecommerce_rastreamento` |
+# MAGIC | **Quarentena** | `squad2/quarantine/ecommerce_rastreamento_entregas` |
+# MAGIC | **control** | `squad2/control/silver/ecommerce_rastreamento/checkpoint.json` |
+# MAGIC
+# MAGIC ### Objetivo
+# MAGIC
+# MAGIC Aplicar validações, padronizações e deduplicação nos dados de rastreamento recebidos da camada Bronze.
+# MAGIC
+# MAGIC ### Regras implementadas
+# MAGIC
 # MAGIC - Validar schema obrigatório da tabela.
-# MAGIC - Validar status_entrega conforme fluxo logístico permitido.
-# MAGIC - Remover ou separar registros com dt_evento nula ou futura.
-# MAGIC - Deduplicar registros por id_rastreamento.
-# MAGIC - Validar id_pedido_ecommerce com a base de pedidos quando disponível.
+# MAGIC - Validar `status_entrega` conforme fluxo logístico permitido.
+# MAGIC - Remover ou separar registros com `dt_evento` nula ou futura.
+# MAGIC - Deduplicar registros por `id_rastreamento`.
+# MAGIC - Validar `id_pedido_ecommerce` com a base de pedidos quando disponível.
 # MAGIC - Enviar registros inválidos para quarentena.
 
 # COMMAND ----------
@@ -295,3 +313,176 @@ file_client = file_system_client_squad.get_file_client(
     "control/silver/ecommerce_rastreamento/checkpoint.json"
 )
 print(file_client.download_file().readall().decode("utf-8"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Insights gráficos da camada Silver
+# MAGIC
+# MAGIC Esta seção apresenta gráficos de apoio para análise da qualidade dos dados tratados na camada Silver, com foco nas validações aplicadas e registros enviados para quarentena.
+
+# COMMAND ----------
+
+# DBTITLE 1,Registros processados x quarentena Mostra se teve dado inválido.
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+qtd_silver = int(len(df_silver))
+qtd_quarentena = int(len(df_quarentena))
+
+df_grafico_qualidade = pd.DataFrame(
+    [
+        {
+            "situacao": "Válidos",
+            "descricao": "Registros aprovados nas validações da Silver",
+            "quantidade": qtd_silver,
+        },
+        {
+            "situacao": "Quarentena",
+            "descricao": "Registros rejeitados pelas validações da Silver",
+            "quantidade": qtd_quarentena,
+        },
+    ]
+)
+
+display(spark.createDataFrame(df_grafico_qualidade))
+
+cores = ["#2E7D32", "#C62828"]
+
+plt.figure(figsize=(8, 5))
+
+barras = plt.bar(
+    df_grafico_qualidade["situacao"],
+    df_grafico_qualidade["quantidade"],
+    color=cores,
+    width=0.45,
+)
+
+maior_valor = df_grafico_qualidade["quantidade"].max()
+plt.ylim(0, max(maior_valor + max(maior_valor * 0.15, 1), 1))
+
+plt.title("Qualidade dos registros na camada Silver")
+plt.xlabel("Situação")
+plt.ylabel("Quantidade de registros")
+
+for barra, valor in zip(barras, df_grafico_qualidade["quantidade"]):
+    plt.text(
+        barra.get_x() + barra.get_width() / 2,
+        valor + max(maior_valor * 0.02, 0.05),
+        str(int(valor)),
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        fontweight="bold",
+    )
+
+plt.legend(
+    handles=[
+        Patch(facecolor=cores[0], label="Válidos = registros gravados na Silver"),
+        Patch(facecolor=cores[1], label="Quarentena = registros inválidos separados"),
+    ],
+    title="Legenda",
+    loc="upper center",
+    bbox_to_anchor=(0.5, -0.18),
+    frameon=True,
+)
+
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Status de entrega após normalização
+# MAGIC Mostra como ficaram os status tratados.
+
+# COMMAND ----------
+
+import matplotlib.pyplot as plt
+
+df_status_base = df_silver.copy()
+
+df_status_base["status_entrega_tratado"] = (
+    df_status_base["status_entrega"]
+    .astype("string")
+    .str.lower()
+    .str.strip()
+)
+
+status_permitidos = [
+    "aguardando coleta",
+    "coletado",
+    "em transporte",
+    "em rota de entrega",
+    "saiu para entrega",
+    "entregue",
+    "falha na entrega",
+    "devolvido",
+    "cancelado",
+]
+
+status_mapa = {
+    "aguardando coleta": "Aguard. coleta",
+    "coletado": "Coletado",
+    "em transporte": "Transporte",
+    "em rota de entrega": "Rota entrega",
+    "saiu para entrega": "Saiu entrega",
+    "entregue": "Entregue",
+    "falha na entrega": "Falha",
+    "devolvido": "Devolvido",
+    "cancelado": "Cancelado",
+}
+
+df_status_contagem = (
+    df_status_base.groupby("status_entrega_tratado", dropna=False)
+    .size()
+    .reset_index(name="quantidade")
+    .rename(columns={"status_entrega_tratado": "status_entrega"})
+)
+
+df_status_todos = pd.DataFrame(
+    {
+        "status_entrega": status_permitidos,
+        "status_curto": [status_mapa[s] for s in status_permitidos],
+    }
+)
+
+df_status_plot = df_status_todos.merge(
+    df_status_contagem,
+    on="status_entrega",
+    how="left"
+)
+
+df_status_plot["quantidade"] = df_status_plot["quantidade"].fillna(0).astype(int)
+
+display(spark.createDataFrame(df_status_plot))
+
+plt.figure(figsize=(12, 5))
+
+barras = plt.bar(
+    df_status_plot["status_curto"],
+    df_status_plot["quantidade"],
+    color="#4C78A8",
+    width=0.55,
+)
+
+maior_valor = df_status_plot["quantidade"].max()
+plt.ylim(0, max(maior_valor + max(maior_valor * 0.15, 1), 1))
+
+plt.title("Distribuição dos status de entrega na Silver")
+plt.xlabel("Status de entrega")
+plt.ylabel("Quantidade de registros")
+plt.xticks(rotation=25, ha="right")
+
+for barra, valor in zip(barras, df_status_plot["quantidade"]):
+    plt.text(
+        barra.get_x() + barra.get_width() / 2,
+        valor + max(maior_valor * 0.02, 0.05),
+        str(int(valor)),
+        ha="center",
+        va="bottom",
+        fontsize=9,
+    )
+
+plt.tight_layout()
+plt.show()
