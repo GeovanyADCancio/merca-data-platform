@@ -42,11 +42,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install azure-identity azure-storage-file-datalake deltalake pyarrow pandas
-
-# COMMAND ----------
-
-# MAGIC %run /Workspace/Users/kalitamariano01@gmail.com/merca-data-platform/notebooks/config/feat_squad2_00_setup_config_teste
+# MAGIC %run /Workspace/Users/kalitamariano01@gmail.com/merca-data-platform/notebooks/config/feat_squad2_00_setup_config
 
 # COMMAND ----------
 
@@ -54,6 +50,8 @@ from azure.identity import ClientSecretCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 from deltalake.writer import write_deltalake
 from datetime import datetime, timezone
+import os
+from dotenv import load_dotenv
 import io
 import json
 import pandas as pd
@@ -162,16 +160,34 @@ def salvar_checkpoint_gold(nome_tabela: str, destino: str, registros: int, detal
 
 # COMMAND ----------
 
-df_silver = ler_parquets_adls(silver_adls_dir)
+print("Lendo dados da camada Silver...")
+
+df_silver = ler_parquets_adls("silver/ecommerce_rastreamento")
 
 df_silver["dt_evento"] = pd.to_datetime(df_silver["dt_evento"], errors="coerce")
 df_silver["bronze_ingested_at"] = pd.to_datetime(df_silver["bronze_ingested_at"], errors="coerce")
-df_silver["status_entrega_normalizado"] = df_silver["status_entrega"].astype("string").str.lower().str.strip()
+df_silver["status_entrega_normalizado"] = (
+    df_silver["status_entrega"]
+    .astype("string")
+    .str.lower()
+    .str.strip()
+)
 
 agora = pd.Timestamp.utcnow().tz_localize(None)
 
+df_silver = (
+    df_silver
+    .sort_values(
+        ["id_rastreamento", "dt_evento", "bronze_ingested_at"],
+        ascending=[True, False, False],
+    )
+    .drop_duplicates(subset=["id_rastreamento"], keep="first")
+    .copy()
+)
+
 print("Registros Silver:", len(df_silver))
-display(spark.createDataFrame(df_silver.head(20)))
+print("IDs unicos rastreamento:", df_silver["id_rastreamento"].nunique())
+print("Duplicados:", len(df_silver) - df_silver["id_rastreamento"].nunique())
 
 # COMMAND ----------
 
@@ -196,7 +212,7 @@ salvar_checkpoint_gold(
     {"granularidade": "data_evento, status_entrega"},
 )
 
-display(spark.createDataFrame(df_gold_status_diario))
+#display(spark.createDataFrame(df_gold_status_diario))
 
 # COMMAND ----------
 
@@ -235,7 +251,7 @@ salvar_checkpoint_gold(
     {"granularidade": "id_pedido_ecommerce"},
 )
 
-display(spark.createDataFrame(df_gold_pedido_ultima_posicao.head(20)))
+#display(spark.createDataFrame(df_gold_pedido_ultima_posicao.head(20)))
 
 # COMMAND ----------
 
@@ -254,7 +270,7 @@ saiu_entrega_2h_path = gold_base_path + "/saiu_para_entrega_2h"
 escrever_delta(saiu_entrega_2h_path, df_gold_saiu_entrega_2h)
 salvar_checkpoint_gold(f"{table_name}_saiu_para_entrega_2h", saiu_entrega_2h_path, len(df_gold_saiu_entrega_2h))
 
-display(spark.createDataFrame(df_gold_saiu_entrega_2h))
+#display(spark.createDataFrame(df_gold_saiu_entrega_2h))
 
 # COMMAND ----------
 
@@ -279,13 +295,15 @@ salvar_checkpoint_gold(
 )
 
 if len(df_alerta_entrega_duplicada) > 0:
-    display(spark.createDataFrame(df_alerta_entrega_duplicada))
+    print("Alertas de entrega duplicada:", len(df_alerta_entrega_duplicada))
 else:
     print("Sem alertas de entrega duplicada.")
 
 # COMMAND ----------
 
 ## Regra 9 - KPI: top 3 transportadoras com mais eventos no micro-lote atual
+# usa a maior data de ingestao apenas para identificar o micro-lote mais recente.
+# O checkpoint da Gold nao usa timestamp para filtrar arquivos processados.
 ultima_ingestao_bronze = df_silver["bronze_ingested_at"].max()
 df_micro_lote_atual = df_silver[df_silver["bronze_ingested_at"] == ultima_ingestao_bronze].copy()
 
@@ -306,7 +324,7 @@ salvar_checkpoint_gold(
     len(df_gold_top3_transportadoras_micro_lote),
 )
 
-display(spark.createDataFrame(df_gold_top3_transportadoras_micro_lote))
+#display(spark.createDataFrame(df_gold_top3_transportadoras_micro_lote))
 
 # COMMAND ----------
 
@@ -346,9 +364,10 @@ salvar_checkpoint_gold(
 )
 
 if len(df_alerta_sem_evento_apos_coleta) > 0:
-    display(spark.createDataFrame(df_alerta_sem_evento_apos_coleta))
+    print("Alertas de pedido sem evento apos coleta:", len(df_alerta_sem_evento_apos_coleta))
 else:
     print("Sem alertas de pedido sem evento apos coleta.")
+
 
 # COMMAND ----------
 
@@ -445,39 +464,14 @@ salvar_checkpoint_gold(
     {"status_calculo": status_sla},
 )
 
-display(spark.createDataFrame(df_gold_sla_entrega))
+#display(spark.createDataFrame(df_gold_sla_entrega))
 
-print("Gold finalizada com sucesso.")
 
-# COMMAND ----------
-
-print(df_pedidos.columns.tolist())
 
 # COMMAND ----------
 
-df_silver["status_entrega_normalizado"].value_counts()
 
-# COMMAND ----------
-
-df_entregues = df_silver[
-    df_silver["status_entrega_normalizado"] == "entregue"
-].copy()
-
-print("Entregues no rastreamento:", len(df_entregues))
-
-# COMMAND ----------
-
-ids_rastreamento = set(df_entregues["id_pedido_ecommerce"].dropna().astype(int))
-ids_pedidos = set(df_pedidos["id_pedido"].dropna().astype(int))
-
-print("IDs entregues no rastreamento:", len(ids_rastreamento))
-print("IDs na tabela pedidos:", len(ids_pedidos))
-print("IDs em comum:", len(ids_rastreamento.intersection(ids_pedidos)))
-
-# COMMAND ----------
-
-import os
-from dotenv import load_dotenv
+print("Carregando configuracao do SQL Server...")
 
 load_dotenv("/Workspace/Users/kalitamariano01@gmail.com/merca-data-platform/.env", override=True)
 
@@ -486,15 +480,14 @@ sql_database = os.getenv("SQL_DATABASE")
 sql_username = os.getenv("SQL_USERNAME")
 sql_password = os.getenv("SQL_PASSWORD")
 
-print("sql_host:", sql_host)
-print("sql_database:", sql_database)
-print("sql_username:", sql_username)
-print("sql_password carregado:", sql_password is not None)
+if not all([sql_host, sql_database, sql_username, sql_password]):
+    raise ValueError("Configuracao SQL Server incompleta. Verifique SQL_HOST, SQL_DATABASE, SQL_USERNAME e SQL_PASSWORD no .env.")
+
+print("Configuracao SQL Server carregada com sucesso.")
 
 # COMMAND ----------
 
-# -------------------------------------------------------------------------
-# # SINK 2: INGESTÃO NO SQL SERVER COM CRIAÇÃO E ALINHAMENTO AUTOMÁTICO
+
 def gravar_gold_sql_server(df: pd.DataFrame, nome_tabela: str, mode: str = "overwrite"):
     if len(df) == 0:
         print(f"Sem registros para gravar no SQL Server: squad2.{nome_tabela}")
@@ -527,12 +520,12 @@ gravar_gold_sql_server(df_alerta_entrega_duplicada, f"{table_name}_alerta_entreg
 gravar_gold_sql_server(df_gold_top3_transportadoras_micro_lote, f"{table_name}_top3_transportadoras_micro_lote")
 gravar_gold_sql_server(df_alerta_sem_evento_apos_coleta, f"{table_name}_alerta_sem_evento_apos_coleta")
 gravar_gold_sql_server(df_gold_sla_entrega, f"{table_name}_sla_entrega")
+print("Gold finalizada com sucesso: Blob e SQL Server atualizados.")
+
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC
-# MAGIC
 # MAGIC
 # MAGIC ##  Insights gráficos da camada Gold
 # MAGIC
@@ -689,9 +682,6 @@ display(spark.createDataFrame(df_status_plot))
 
 # COMMAND ----------
 
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
-
 df_saiu_entrega = df_silver[
     df_silver["status_entrega_normalizado"] == "saiu para entrega"
 ].copy()
@@ -766,7 +756,7 @@ df_grafico_saida_entrega_faixas = pd.DataFrame(
     ]
 )
 
-display(spark.createDataFrame(df_grafico_saida_entrega_faixas))
+#display(spark.createDataFrame(df_grafico_saida_entrega_faixas))
 
 cores = ["#4C78A8", "#72B7B2", "#F58518", "#E45756", "#BAB0AC"]
 
@@ -839,7 +829,7 @@ df_grafico_sla = pd.DataFrame(
     ]
 )
 
-display(spark.createDataFrame(df_grafico_sla))
+#display(spark.createDataFrame(df_grafico_sla))
 
 cores = ["#2E7D32", "#C62828"]
 
@@ -922,7 +912,7 @@ df_grafico_sem_evento = pd.DataFrame(
     ]
 )
 
-display(spark.createDataFrame(df_grafico_sem_evento))
+#display(spark.createDataFrame(df_grafico_sem_evento))
 
 cor_alerta = "#C62828"
 

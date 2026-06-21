@@ -44,11 +44,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install azure-identity azure-storage-file-datalake deltalake pyarrow pandas
-
-# COMMAND ----------
-
-# MAGIC %run /Workspace/Users/kalitamariano01@gmail.com/merca-data-platform/notebooks/config/feat_squad2_00_setup_config_teste
+# MAGIC %run /Workspace/Users/kalitamariano01@gmail.com/merca-data-platform/notebooks/config/feat_squad2_00_setup_config
 
 # COMMAND ----------
 
@@ -133,14 +129,7 @@ def salvar_checkpoint_silver(checkpoint: dict):
 print(f"Checkpoint salvo em: az://{container_squad}/{checkpoint_adls_path}")
 
 
-def escrever_delta(path: str, df: pd.DataFrame, mode: str = "overwrite"):
-    tabela_arrow = pa.Table.from_pandas(df, preserve_index=False)
-    write_deltalake(
-        path,
-        tabela_arrow,
-        mode=mode,
-        storage_options=storage_options,
-    )
+    
 
 # COMMAND ----------
 
@@ -175,12 +164,39 @@ for arquivo in arquivos_bronze_delta:
 df_bronze = pd.concat(lista_bronze, ignore_index=True)
 
 print("Registros Bronze:", len(df_bronze))
-display(spark.createDataFrame(df_bronze.head(20)))
+# display usado apenas para análise manual
+# display(spark.createDataFrame(df_bronze.head(20)))
 
 # COMMAND ----------
 
+print("Validando schema obrigatório da Bronze...")
+
+# Valida se todas as colunas obrigatórias da Bronze estão presentes
+# antes de iniciar as transformações da Silver.
+colunas_esperadas = [
+    "id_rastreamento",
+    "id_pedido_ecommerce",
+    "codigo_rastreio",
+    "id_transportadora",
+    "status_entrega",
+    "dt_evento",
+    "bronze_source_file",
+    "bronze_ingested_at",
+]
+
+colunas_ausentes = [
+    coluna for coluna in colunas_esperadas
+    if coluna not in df_bronze.columns
+]
+
+if colunas_ausentes:
+    raise ValueError(f"Schema inválido na Bronze. Colunas ausentes: {colunas_ausentes}")
+
+
 df = df_bronze.copy()
 
+# Padroniza os tipos das colunas e realiza limpeza básica
+# para preparação das regras de negócio da Silver.
 df_silver_pre = pd.DataFrame({
     "id_rastreamento": pd.to_numeric(df["id_rastreamento"], errors="coerce").astype("Int64"),
     "id_pedido_ecommerce": pd.to_numeric(df["id_pedido_ecommerce"], errors="coerce").astype("Int64"),
@@ -197,8 +213,11 @@ df_silver_pre["status_entrega_normalizado"] = df_silver_pre["status_entrega"].st
 
 agora = pd.Timestamp.utcnow().tz_localize(None)
 
+# Registros com status nulo ou fora do fluxo logístico
+# permitido são enviados para quarentena.
 df_quarentena_status = df_silver_pre[
-    ~df_silver_pre["status_entrega_normalizado"].isin(status_entrega_permitidos)
+    df_silver_pre["status_entrega_normalizado"].isna()
+    | ~df_silver_pre["status_entrega_normalizado"].isin(status_entrega_permitidos)
 ].copy()
 df_quarentena_status["motivo_quarentena"] = "status_entrega fora do fluxo logistico permitido"
 
@@ -212,6 +231,7 @@ df_silver_valida = df_silver_pre[
     & df_silver_pre["id_pedido_ecommerce"].notna()
     & df_silver_pre["dt_evento"].notna()
     & (df_silver_pre["dt_evento"] <= agora)
+    & df_silver_pre["status_entrega_normalizado"].notna()
     & df_silver_pre["status_entrega_normalizado"].isin(status_entrega_permitidos)
 ].copy()
 
@@ -250,6 +270,9 @@ print("Quarentena pedido orfao:", len(df_quarentena_pedido_orfao))
 
 # COMMAND ----------
 
+# Mantém apenas o registro mais recente para cada
+# id_rastreamento utilizando dt_evento e bronze_ingested_at.
+
 df_silver = (
     df_silver_valida
     .sort_values(["id_rastreamento", "dt_evento", "bronze_ingested_at"], ascending=[True, False, False])
@@ -259,6 +282,10 @@ df_silver = (
 )
 
 df_silver["silver_updated_at"] = agora
+df_silver["ano_processamento"] = pd.to_datetime(df_silver["silver_updated_at"]).dt.year
+df_silver["mes_processamento"] = pd.to_datetime(df_silver["silver_updated_at"]).dt.month
+df_silver["dia_processamento"] = pd.to_datetime(df_silver["silver_updated_at"]).dt.day
+df_silver["hora_processamento"] = pd.to_datetime(df_silver["silver_updated_at"]).dt.hour
 
 df_quarentena = pd.concat(
     [df_quarentena_status, df_quarentena_data, df_quarentena_pedido_orfao],
@@ -272,21 +299,82 @@ if len(df_quarentena) > 0:
 
 print("Registros Silver:", len(df_silver))
 print("Registros Quarentena:", len(df_quarentena))
-
-display(spark.createDataFrame(df_silver.head(20)))
+# 
+# display(spark.createDataFrame(df_silver.head(20)))
 
 # COMMAND ----------
 
-escrever_delta(silver_delta_path, df_silver, mode="overwrite")
+# Grava os registros válidos na camada Silver
+# utilizando particionamento por data/hora de processamento.
+
+def escrever_delta(path: str, df: pd.DataFrame, mode: str = "append", partition_by=None):
+    tabela_arrow = pa.Table.from_pandas(df, preserve_index=False)
+
+    opcoes = {
+        "mode": mode,
+        "storage_options": storage_options,
+    }
+
+    if partition_by:
+        opcoes["partition_by"] = partition_by
+
+    if mode == "overwrite":
+        opcoes["schema_mode"] = "overwrite"
+
+    write_deltalake(
+        path,
+        tabela_arrow,
+        **opcoes,
+    )
+
+    print(f"Delta salvo em: {path} | registros: {len(df)}")
+
+
+particoes_silver = [
+    "ano_processamento",
+    "mes_processamento",
+    "dia_processamento",
+    "hora_processamento",
+]
+
+modo_gravacao_silver = "append"
+modo_gravacao_quarentena = "append"
+
+print("Gravando dados validos na camada Silver...")
+escrever_delta(
+    silver_delta_path,
+    df_silver,
+    mode=modo_gravacao_silver,
+    partition_by=particoes_silver,
+)
+
 print("Silver salva com sucesso:", silver_delta_path)
 
+# Grava registros rejeitados pelas regras de qualidade
+# na área de quarentena para análise posterior.
 if len(df_quarentena) > 0:
-    escrever_delta(quarantine_delta_path, df_quarentena, mode="overwrite")
+    print("Gravando registros invalidos na quarentena...")
+
+    df_quarentena["ano_processamento"] = pd.to_datetime(df_quarentena["silver_updated_at"]).dt.year
+    df_quarentena["mes_processamento"] = pd.to_datetime(df_quarentena["silver_updated_at"]).dt.month
+    df_quarentena["dia_processamento"] = pd.to_datetime(df_quarentena["silver_updated_at"]).dt.day
+    df_quarentena["hora_processamento"] = pd.to_datetime(df_quarentena["silver_updated_at"]).dt.hour
+
+    escrever_delta(
+        quarantine_delta_path,
+        df_quarentena,
+        mode=modo_gravacao_quarentena,
+        partition_by=particoes_silver,
+    )
+
     print("Quarentena salva com sucesso:", quarantine_delta_path)
 else:
     print("Sem registros de quarentena para gravar.")
 
 # COMMAND ----------
+
+# Atualiza o checkpoint da Silver com informações
+# da execução atual para rastreabilidade do processamento.
 
 checkpoint_silver = carregar_checkpoint_silver()
 checkpoint_silver["origem"] = bronze_delta_path
@@ -306,13 +394,6 @@ checkpoint_silver["validacoes"] = [
 
 salvar_checkpoint_silver(checkpoint_silver)
 print("Checkpoint Silver salvo com sucesso.")
-
-# COMMAND ----------
-
-file_client = file_system_client_squad.get_file_client(
-    "control/silver/ecommerce_rastreamento/checkpoint.json"
-)
-print(file_client.download_file().readall().decode("utf-8"))
 
 # COMMAND ----------
 
@@ -345,7 +426,7 @@ df_grafico_qualidade = pd.DataFrame(
     ]
 )
 
-display(spark.createDataFrame(df_grafico_qualidade))
+# display(spark.createDataFrame(df_grafico_qualidade))
 
 cores = ["#2E7D32", "#C62828"]
 
@@ -455,7 +536,7 @@ df_status_plot = df_status_todos.merge(
 
 df_status_plot["quantidade"] = df_status_plot["quantidade"].fillna(0).astype(int)
 
-display(spark.createDataFrame(df_status_plot))
+# display(spark.createDataFrame(df_status_plot))
 
 plt.figure(figsize=(12, 5))
 

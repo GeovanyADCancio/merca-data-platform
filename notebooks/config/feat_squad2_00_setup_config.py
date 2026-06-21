@@ -4,11 +4,20 @@
 # environment_version = "2"
 # dependencies = [
 #   "python-dotenv",
+#   "azure-identity",
+#   "azure-storage-file-datalake",
+#   "deltalake",
+#   "pyarrow",
+#   "pandas",
 # ]
 # ///
 # MAGIC %md
 # MAGIC ###Configuracao - ecommerce_rastreamento
 # MAGIC Define credenciais, caminhos ADLS e helpers usados pelas camadas bronze, silver e gold.
+
+# COMMAND ----------
+
+# MAGIC %pip install azure-identity azure-storage-file-datalake deltalake pyarrow pandas
 
 # COMMAND ----------
 
@@ -225,3 +234,8 @@ print("quarantine_path:", quarantine_path)
 print("control_base_path:", control_base_path)
 print("adls_oauth_configurado:", adls_oauth_configurado)
 print("env_carregado:", env_carregado)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC

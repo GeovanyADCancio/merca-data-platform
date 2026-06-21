@@ -45,24 +45,13 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Instalação das dependências
-# MAGIC
-# MAGIC Instala as bibliotecas necessárias para autenticação no Azure, acesso ao ADLS Gen2, leitura de arquivos Parquet, manipulação de dados com Pandas e escrita em Delta Lake.
-
-# COMMAND ----------
-
-# MAGIC %pip install azure-identity azure-storage-file-datalake deltalake pyarrow pandas
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ### Carregamento das configurações do projeto
 # MAGIC
 # MAGIC Executa o notebook de configuração da Squad 2, responsável por disponibilizar variáveis, credenciais, caminhos e funções auxiliares utilizadas neste pipeline.
 
 # COMMAND ----------
 
-# MAGIC %run /Workspace/Users/kalitamariano01@gmail.com/merca-data-platform/notebooks/config/feat_squad2_00_setup_config_teste
+# MAGIC %run /Workspace/Users/kalitamariano01@gmail.com/merca-data-platform/notebooks/config/feat_squad2_00_setup_config
 
 # COMMAND ----------
 
@@ -240,6 +229,9 @@ for arquivo in arquivos_novos:
     df_pandas = ler_parquet_adls(arquivo)
     df_bronze = adicionar_metadados_bronze(df_pandas, arquivo)
     lista_dfs.append(df_bronze)
+if not lista_dfs:
+    print("Nenhum arquivo novo para processar na Bronze.")
+    dbutils.notebook.exit("Nenhum arquivo novo para processar na Bronze.")
 
 df_bronze_final = pd.concat(lista_dfs, ignore_index=True)
 
@@ -248,7 +240,8 @@ if colunas_ausentes:
     raise ValueError(f"Schema incompleto no micro-lote. Colunas ausentes: {colunas_ausentes}")
 
 print("Total de registros:", len(df_bronze_final))
-display(spark.createDataFrame(df_bronze_final).limit(20))
+print("Total de registros:", len(df_bronze_final))
+print("Colunas:", df_bronze_final.columns.tolist())
 
 # COMMAND ----------
 
@@ -261,6 +254,10 @@ display(spark.createDataFrame(df_bronze_final).limit(20))
 
 # DBTITLE 1,Gravação da camada Bronze (Delta Lake)
 import pyarrow as pa
+
+if "df_bronze_final" not in globals():
+    print("Nenhum DataFrame Bronze disponível para gravação. Não há arquivos novos para processar.")
+    dbutils.notebook.exit("Nenhum arquivo novo para processar na Bronze.")
 
 tabela_arrow = pa.Table.from_pandas(df_bronze_final, preserve_index=False)
 
