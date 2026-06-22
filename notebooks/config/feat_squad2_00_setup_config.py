@@ -12,7 +12,7 @@
 # ]
 # ///
 # MAGIC %md
-# MAGIC ###Configuracao - ecommerce_rastreamento
+# MAGIC ## Configuração Inicial - ecommerce_rastreamento
 # MAGIC Define credenciais, caminhos ADLS e helpers usados pelas camadas bronze, silver e gold.
 
 # COMMAND ----------
@@ -22,6 +22,15 @@
 # COMMAND ----------
 
 # MAGIC %pip install python-dotenv
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC
+# MAGIC ### Configuração de Credenciais ADLS
+# MAGIC
+# MAGIC  Define as credenciais utilizadas para autenticação OAuth no Azure Data Lake Storage Gen2.
 
 # COMMAND ----------
 
@@ -67,6 +76,10 @@ def get_config_value(env_name: str, secret_key: str | None = None):
 
     return None
 
+# Definição dos Caminhos do Data Lake
+
+# Configuração dos diretórios utilizados nas camadas Bronze, Silver, Gold,
+# Quarantena e Controle.
 
 container_raw = "raw"
 raw_input_dir = "real-time-data"
@@ -85,6 +98,10 @@ gold_path = raw_base_path + "squad2/gold/ecommerce_rastreamento"
 quarantine_path = raw_base_path + "squad2/quarantine/ecommerce_rastreamento_entregas"
 control_base_path = raw_base_path + "control"
 
+
+# Configuração de Banco de Dados
+# Define os databases, tabelas e parâmetros utilizados nas camadas do projeto.
+
 database_bronze = "bronze"
 database_silver = "silver"
 database_gold = "gold"
@@ -92,6 +109,10 @@ table_name = "ecommerce_rastreamento"
 business_table_name = "ecommerce_rastreamento_entregas"
 pedidos_silver_table = "silver.ecommerce_pedidos"
 sla_entrega_dias = 7
+
+
+# Regras de Validação do Rastreamento
+# Define colunas obrigatórias e status válidos para processamento dos eventos de rastreamento.
 
 required_tracking_columns = [
     "id_rastreamento",
@@ -113,6 +134,13 @@ status_entrega_permitidos = [
     "devolvido",
     "cancelado",
 ]
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Configuração de Credenciais ADLS
+# MAGIC ### Funções Utilitárias e Configuração OAuth
+# MAGIC  Funções responsáveis pela autenticação no ADLS, criação de databases e controle de checkpoints.
 
 # COMMAND ----------
 
@@ -221,6 +249,8 @@ def salvar_checkpoint(camada: str, tabela: str, checkpoint: dict):
     dbutils.fs.put(path, json.dumps(checkpoint, indent=2, ensure_ascii=False), overwrite=True)
     print(f"Checkpoint salvo em: {path}")
 
+# Inicialização do Ambiente
+# Aplica a configuração OAuth do ADLS, cria os databases necessários e exibe os principais paths utilizados pelo projeto.
 
 adls_oauth_configurado = configurar_adls_oauth()
 for db in [database_bronze, database_silver, database_gold]:

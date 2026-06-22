@@ -48,6 +48,13 @@
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ### Importação das Bibliotecas
+# MAGIC  Importa bibliotecas para autenticação no Azure, leitura de arquivos Parquet, manipulação com Pandas/PyArrow e escrita em Delta Lake.
+# MAGIC
+
+# COMMAND ----------
+
 from azure.identity import ClientSecretCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 from deltalake import DeltaTable
@@ -58,6 +65,14 @@ import pandas as pd
 import pyarrow as pa
 import io
 import pyarrow.parquet as pq
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 3. Conexão com ADLS e Definição dos Paths
+# MAGIC Cria o cliente do Azure Data Lake Storage e define os caminhos de origem, destino, quarentena e checkpoint usados nesta execução.
+# MAGIC
+# MAGIC
 
 # COMMAND ----------
 
@@ -97,6 +112,12 @@ print("checkpoint_adls_path:", checkpoint_adls_path)
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ###  Funções de Checkpoint
+# MAGIC Centraliza a leitura e a gravação do checkpoint para registrar a última execução, origem, destino e quantidade de registros processados.
+
+# COMMAND ----------
+
 def carregar_checkpoint_silver() -> dict:
     try:
         file_client = file_system_client_squad.get_file_client(checkpoint_adls_path)
@@ -133,6 +154,14 @@ print(f"Checkpoint salvo em: az://{container_squad}/{checkpoint_adls_path}")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ###  Leitura dos Dados da Bronze
+# MAGIC  Lista os arquivos Parquet da tabela Delta Bronze, ignora metadados do `_delta_log` e consolida os dados em um DataFrame Pandas.
+# MAGIC
+# MAGIC
+
+# COMMAND ----------
+
 arquivos_bronze_delta = []
 
 paths = file_system_client_squad.get_paths(
@@ -166,6 +195,14 @@ df_bronze = pd.concat(lista_bronze, ignore_index=True)
 print("Registros Bronze:", len(df_bronze))
 # display usado apenas para análise manual
 # display(spark.createDataFrame(df_bronze.head(20)))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Validação de Schema e Padronização
+# MAGIC Confere as colunas obrigatórias, padroniza tipos e normaliza campos usados nas regras de qualidade da camada Silver.
+# MAGIC
+# MAGIC
 
 # COMMAND ----------
 
@@ -241,6 +278,13 @@ print("Quarentena data:", len(df_quarentena_data))
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ### Validação do Pedido Pai
+# MAGIC Verifica se `id_pedido_ecommerce` existe na tabela Silver de pedidos. Caso a tabela ainda não esteja disponível, a validação fica registrada como pendente e não bloqueia o pipeline.
+# MAGIC
+
+# COMMAND ----------
+
 # Regra 5: validar pedido pai na Silver de pedidos, se a tabela existir.
 # Se a tabela de pedidos ainda nao existir no ambiente, a validacao fica registrada como pendente
 # para nao bloquear as outras regras da Silver de rastreamento.
@@ -270,8 +314,13 @@ print("Quarentena pedido orfao:", len(df_quarentena_pedido_orfao))
 
 # COMMAND ----------
 
-# Mantém apenas o registro mais recente para cada
-# id_rastreamento utilizando dt_evento e bronze_ingested_at.
+# MAGIC %md
+# MAGIC ### Deduplicação e Montagem da Quarentena
+# MAGIC Mantém o evento mais recente por `id_rastreamento`, cria colunas de particionamento e consolida os registros rejeitados pelas regras de qualidade.
+
+# COMMAND ----------
+
+
 
 df_silver = (
     df_silver_valida
@@ -304,8 +353,12 @@ print("Registros Quarentena:", len(df_quarentena))
 
 # COMMAND ----------
 
-# Grava os registros válidos na camada Silver
-# utilizando particionamento por data/hora de processamento.
+# MAGIC %md
+# MAGIC ### Atualização do Checkpoint
+# MAGIC Salva metadados da execução atual para auditoria: origem, destino, registros processados, quarentena e validações aplicadas.
+
+# COMMAND ----------
+
 
 def escrever_delta(path: str, df: pd.DataFrame, mode: str = "append", partition_by=None):
     tabela_arrow = pa.Table.from_pandas(df, preserve_index=False)
@@ -329,6 +382,7 @@ def escrever_delta(path: str, df: pd.DataFrame, mode: str = "append", partition_
 
     print(f"Delta salvo em: {path} | registros: {len(df)}")
 
+# utilizando particionamento por data/hora de processamento.
 
 particoes_silver = [
     "ano_processamento",
