@@ -34,7 +34,7 @@
 # MAGIC | 2 | Tipagem temporal | Conversao de `dt_pedido` para timestamp e descarte de registros com data invalida |
 # MAGIC | 3 | Normalizacao textual | Padronizacao de `status_pedido` e `metodo_pagamento` |
 # MAGIC | 4 | Normalizacao financeira | Conversao de `valor_total` e `valor_frete` para `Decimal(10,2)`, com virgula decimal tratada |
-# MAGIC | 5 | Compatibilidade entre pipelines | Escrita da Silver em Parquet para atender o consumo atual de `ecommerce_itens_pedido` |
+# MAGIC | 5 | Persistencia em Delta Lake | Escrita da Silver em Delta (ACID, time travel e leitura incremental) |
 # MAGIC
 # MAGIC ---
 # MAGIC
@@ -69,9 +69,9 @@
 # # 0.1 INSTALACAO DO SDK AZURE  --  *** MANTER COMENTADO NO JOB AGENDADO ***
 # # ============================================================
 # # (descomente apenas para a limpeza manual; reinicia o Python)
+# # python-dotenv vai junto porque nao vem instalado no Free/Serverless.
 
 # %pip install azure-storage-file-datalake azure-identity python-dotenv -q
-
 # dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -101,16 +101,19 @@
 #     credential=_cred,
 # ).get_file_system_client(_container)
 
-# # Apaga so o Bronze de pedidos (o que esta travando a escrita Delta).
-# # Para um reprocesso 100% limpo, descomente tambem silver/gold.
+# # Reset completo: remove Bronze, Silver e Gold de pedidos.
+# # Necessario quando versoes antigas do script gravaram com particoes
+# # diferentes (partition_year/partition_month) OU em formato diferente
+# # (ex.: Silver migrando de Parquet para Delta). Escrever Delta num path
+# # que ja tem arquivos em outro formato gera erro de formato incompativel.
 # for rel in [
 #     "bronze/ecommerce_pedidos",
 #     "silver/ecommerce_pedidos",
-#     # "gold/gold_kpi_receita_mom",
-#     # "gold/gold_kpi_ticket_medio_pagamento_anual",
-#     # "gold/gold_kpi_taxa_cancelamento_mensal",
-#     # "gold/gold_kpi_volume_dia_semana",
-#     # "gold/gold_kpi_receita_media_estado_entrega",
+#     "gold/gold_kpi_receita_mom",
+#     "gold/gold_kpi_ticket_medio_pagamento_anual",
+#     "gold/gold_kpi_taxa_cancelamento_mensal",
+#     "gold/gold_kpi_volume_dia_semana",
+#     "gold/gold_kpi_receita_media_estado_entrega",
 # ]:
 #     d = _fs.get_directory_client(rel)
 #     if d.exists():
@@ -420,9 +423,14 @@ display(df_bronze.limit(5))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Camada Silver - Limpeza, Tipagem e Compatibilidade
+# MAGIC ## 3. Camada Silver - Limpeza, Tipagem e Persistencia em Delta
 # MAGIC
-# MAGIC A Silver de `ecommerce_pedidos` e gravada em **Parquet** para manter compatibilidade com o pipeline existente de `ecommerce_itens_pedido`, que ja consome `silver/ecommerce_pedidos` nesse formato.
+# MAGIC A Silver de `ecommerce_pedidos` e gravada em **Delta**.
+# MAGIC
+# MAGIC > ⚠️ O pipeline `ecommerce_itens_pedido` ainda le este path como Parquet
+# MAGIC > (`spark.read.format("parquet").load(path_silver_pedidos)`). Atualize esse
+# MAGIC > script para `format("delta")` antes da proxima execucao, ou ele vai falhar
+# MAGIC > ao ler os novos arquivos Delta gravados aqui.
 
 # COMMAND ----------
 
@@ -498,18 +506,18 @@ df_silver_final = df_silver.select(
     "silver_processed_at"
 )
 
-print(f"Gravando dados limpos em Parquet: {path_silver}")
+print(f"Gravando dados limpos em Delta: {path_silver}")
 
 (
     df_silver_final.write
-    .format("parquet")
+    .format("delta")
     .mode("append")
     .options(**adls_options)
     .partitionBy("ano_particao", "mes_particao")
     .save(path_silver)
 )
 
-print("SUCESSO! Pedidos refinados e salvos na Silver em Parquet.\n")
+print("SUCESSO! Pedidos refinados e salvos na Silver em Delta.\n")
 display(df_silver_final.limit(5))
 
 # COMMAND ----------
@@ -537,7 +545,7 @@ print("Iniciando processamento da camada Gold (KPIs Batch de Pedidos)...")
 
 timestamp_gold = date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss")
 
-df_silver_gold = spark.read.format("parquet").options(**adls_options).load(path_silver)
+df_silver_gold = spark.read.format("delta").options(**adls_options).load(path_silver)
 
 df_gold_base = (
     df_silver_gold
@@ -891,7 +899,7 @@ import pandas as pd
 print("Gerando insights de qualidade da Silver (Pedidos)...\n")
 
 df_bronze_check = spark.read.format("delta").options(**adls_options).load(path_bronze)
-df_silver_check = spark.read.format("parquet").options(**adls_options).load(path_silver)
+df_silver_check = spark.read.format("delta").options(**adls_options).load(path_silver)
 total_registros_bronze = df_bronze_check.count()
 total_registros_silver = df_silver_check.count()
 
@@ -1021,7 +1029,7 @@ print("Insights de qualidade gerados com sucesso.\n")
 
 # for path, formato in [
 #     (path_bronze_trunc, "delta"),
-#     (path_silver_trunc, "parquet")
+#     (path_silver_trunc, "delta")
 # ]:
 #     try:
 #         df_vazio = spark.read.format(formato).options(**adls_options).load(path).limit(0)
