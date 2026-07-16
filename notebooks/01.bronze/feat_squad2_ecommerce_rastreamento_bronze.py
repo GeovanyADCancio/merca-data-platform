@@ -58,6 +58,7 @@
 from azure.identity import ClientSecretCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 from deltalake.writer import write_deltalake
+from deltalake import DeltaTable, write_deltalake
 from deltalake import DeltaTable
 from datetime import datetime, timezone
 import io
@@ -271,6 +272,7 @@ write_deltalake(
         "dia_ingestao",
         "hora_ingestao",
     ],
+    schema_mode="merge",
     storage_options=storage_options,
 )
 

@@ -120,13 +120,13 @@ def ler_parquets_adls(diretorio: str, client=None) -> pd.DataFrame:
         lista.append(table.to_pandas())
 
     return pd.concat(lista, ignore_index=True)
-
 def escrever_delta(path: str, df: pd.DataFrame, mode: str = "overwrite"):
     tabela_arrow = pa.Table.from_pandas(df, preserve_index=False)
     write_deltalake(
         path,
         tabela_arrow,
         mode=mode,
+        schema_mode="overwrite",
         storage_options=storage_options,
     )
     print(f"Delta salvo em: {path} | registros: {len(df)}")
@@ -216,45 +216,6 @@ salvar_checkpoint_gold(
 
 # COMMAND ----------
 
-df_ultimo_evento = (
-    df_silver.sort_values(["id_pedido_ecommerce", "dt_evento"], ascending=[True, False])
-    .drop_duplicates(subset=["id_pedido_ecommerce"], keep="first")
-    [["id_pedido_ecommerce", "dt_evento", "status_entrega", "codigo_rastreio"]]
-    .rename(
-        columns={
-            "dt_evento": "ultima_data_evento",
-            "status_entrega": "ultimo_status_entrega",
-            "codigo_rastreio": "ultimo_codigo_rastreio",
-        }
-    )
-)
-
-df_eventos_por_pedido = (
-    df_silver.groupby("id_pedido_ecommerce", dropna=False)
-    .size()
-    .reset_index(name="qtd_eventos_rastreamento")
-)
-
-df_gold_pedido_ultima_posicao = df_ultimo_evento.merge(
-    df_eventos_por_pedido,
-    on="id_pedido_ecommerce",
-    how="left",
-)
-df_gold_pedido_ultima_posicao["gold_updated_at"] = agora
-
-pedido_ultima_posicao_path = gold_base_path + "/pedido_ultima_posicao"
-escrever_delta(pedido_ultima_posicao_path, df_gold_pedido_ultima_posicao)
-salvar_checkpoint_gold(
-    f"{table_name}_pedido_ultima_posicao",
-    pedido_ultima_posicao_path,
-    len(df_gold_pedido_ultima_posicao),
-    {"granularidade": "id_pedido_ecommerce"},
-)
-
-#display(spark.createDataFrame(df_gold_pedido_ultima_posicao.head(20)))
-
-# COMMAND ----------
-
 ## Regra 6 - KPI: pedidos que entraram em "saiu para entrega" nas ultimas 2 horas
 df_gold_saiu_entrega_2h = pd.DataFrame(
     [{
@@ -324,7 +285,7 @@ salvar_checkpoint_gold(
     len(df_gold_top3_transportadoras_micro_lote),
 )
 
-#display(spark.createDataFrame(df_gold_top3_transportadoras_micro_lote))
+display(spark.createDataFrame(df_gold_top3_transportadoras_micro_lote))
 
 # COMMAND ----------
 
@@ -513,6 +474,127 @@ def gravar_gold_sql_server(df: pd.DataFrame, nome_tabela: str, mode: str = "over
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ###  Pedido na Última Posição
+# MAGIC  Mantém o último evento conhecido de rastreamento por pedido.
+
+# COMMAND ----------
+
+
+df_gold_pedido_ultima_posicao = (
+    df_silver.sort_values(
+        ["id_pedido_ecommerce", "dt_evento", "bronze_ingested_at"],
+        ascending=[True, False, False],
+    )
+    .drop_duplicates(subset=["id_pedido_ecommerce"], keep="first")
+    .rename(
+        columns={
+            "dt_evento": "ultima_data_evento",
+            "status_entrega": "ultimo_status_entrega",
+            "codigo_rastreio": "ultimo_codigo_rastreio",
+        }
+    )
+)
+
+df_gold_pedido_ultima_posicao["gold_updated_at"] = agora
+
+pedido_ultima_posicao_path = gold_base_path + "/pedido_ultima_posicao"
+
+escrever_delta(
+    pedido_ultima_posicao_path,
+    df_gold_pedido_ultima_posicao
+)
+
+salvar_checkpoint_gold(
+    f"{table_name}_pedido_ultima_posicao",
+    pedido_ultima_posicao_path,
+    len(df_gold_pedido_ultima_posicao),
+)
+
+display(spark.createDataFrame(df_gold_pedido_ultima_posicao))
+
+# COMMAND ----------
+
+df_gold_rastreamento_consolidado = (
+    df_silver.assign(data_evento=df_silver["dt_evento"].dt.date)
+    .groupby(["data_evento", "status_entrega", "id_transportadora"], dropna=False)
+    .agg(
+        qtd_eventos=("id_rastreamento", "count"),
+        qtd_pedidos=("id_pedido_ecommerce", "nunique"),
+        qtd_codigos_rastreio=("codigo_rastreio", "nunique"),
+    )
+    .reset_index()
+)
+
+df_gold_rastreamento_consolidado["gold_updated_at"] = agora
+# Métrica Regra 6: pedidos que saíram para entrega nas últimas 2 horas
+df_gold_rastreamento_consolidado["qtd_pedidos_saiu_para_entrega_2h"] = int(
+    df_gold_saiu_entrega_2h["qtd_pedidos_saiu_para_entrega_2h"].max()
+    if len(df_gold_saiu_entrega_2h) > 0
+    else 0
+)
+
+# Métricas Regra 7: SLA de entrega
+df_gold_rastreamento_consolidado["qtd_pedidos_entregues"] = int(
+    df_gold_sla_entrega["qtd_pedidos_entregues"].max()
+    if len(df_gold_sla_entrega) > 0
+    else 0
+)
+
+df_gold_rastreamento_consolidado["qtd_pedidos_no_prazo"] = int(
+    df_gold_sla_entrega["qtd_pedidos_no_prazo"].max()
+    if len(df_gold_sla_entrega) > 0
+    else 0
+)
+
+df_gold_rastreamento_consolidado["percentual_entregue_no_prazo"] = float(
+    df_gold_sla_entrega["percentual_entregue_no_prazo"].max()
+    if len(df_gold_sla_entrega) > 0
+    else 0
+)
+
+# Métrica Regra 8: entregas duplicadas
+df_gold_rastreamento_consolidado["qtd_alertas_entrega_duplicada"] = len(
+    df_alerta_entrega_duplicada
+)
+
+# Métrica Regra 10: pedidos sem evento após coleta
+df_gold_rastreamento_consolidado["qtd_alertas_sem_evento_apos_coleta"] = len(
+    df_alerta_sem_evento_apos_coleta
+)
+
+# Métrica Regra 9: top 3 transportadoras no micro-lote atual
+df_gold_rastreamento_consolidado = df_gold_rastreamento_consolidado.merge(
+    df_gold_top3_transportadoras_micro_lote[
+        ["id_transportadora", "qtd_eventos_micro_lote"]
+    ],
+    on="id_transportadora",
+    how="left",
+)
+
+df_gold_rastreamento_consolidado["qtd_eventos_micro_lote"] = (
+    df_gold_rastreamento_consolidado["qtd_eventos_micro_lote"]
+    .fillna(0)
+    .astype(int)
+)
+rastreamento_consolidado_path = gold_base_path + "/rastreamento_consolidado"
+
+escrever_delta(
+    rastreamento_consolidado_path,
+    df_gold_rastreamento_consolidado
+)
+
+salvar_checkpoint_gold(
+    f"{table_name}_consolidado",
+    rastreamento_consolidado_path,
+    len(df_gold_rastreamento_consolidado),
+    {"granularidade": "data_evento, status_entrega, id_transportadora"},
+)
+
+display(spark.createDataFrame(df_gold_rastreamento_consolidado))
+
+# COMMAND ----------
+
 gravar_gold_sql_server(df_gold_status_diario, f"{table_name}_status_diario")
 gravar_gold_sql_server(df_gold_pedido_ultima_posicao, f"{table_name}_pedido_ultima_posicao")
 gravar_gold_sql_server(df_gold_saiu_entrega_2h, f"{table_name}_saiu_para_entrega_2h")
@@ -520,6 +602,10 @@ gravar_gold_sql_server(df_alerta_entrega_duplicada, f"{table_name}_alerta_entreg
 gravar_gold_sql_server(df_gold_top3_transportadoras_micro_lote, f"{table_name}_top3_transportadoras_micro_lote")
 gravar_gold_sql_server(df_alerta_sem_evento_apos_coleta, f"{table_name}_alerta_sem_evento_apos_coleta")
 gravar_gold_sql_server(df_gold_sla_entrega, f"{table_name}_sla_entrega")
+gravar_gold_sql_server(
+    df_gold_rastreamento_consolidado,
+    f"{table_name}_consolidado"
+)
 print("Gold finalizada com sucesso: Blob e SQL Server atualizados.")
 
 
