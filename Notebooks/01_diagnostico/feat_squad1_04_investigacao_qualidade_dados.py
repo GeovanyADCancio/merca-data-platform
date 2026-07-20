@@ -44,6 +44,33 @@ print(f"Itens órfãos (sem pedido na Silver): {itens_orfaos} ({itens_orfaos/tot
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## 1b. Correção — referência deve unir Bronze + Silver, não só Silver
+# MAGIC
+# MAGIC O utils oficial da squad (compartilhado pelo Jonathan) tem uma função
+# MAGIC `obter_referencia_ids_uniao_silver_bronze` que documenta um ponto importante: um `id_pedido`
+# MAGIC pode existir fisicamente na Bronze e ainda não ter sido promovido à Silver — por causa de
+# MAGIC qualquer outra regra do Contrato de Dados, sem relação com o item em si. Comparar só contra a
+# MAGIC Silver (Seção 1) superestima a taxa de órfãos. Esta célula refaz o cálculo unindo Bronze e Silver
+# MAGIC de `pedidos`, para obter o número real de itens sem NENHUM pedido pai — nem em Bronze, nem em
+# MAGIC Silver.
+
+# COMMAND ----------
+
+df_pedidos_bronze = ler_delta("bronze", "ecommerce_pedidos")
+
+ids_bronze = {row["id_pedido"] for row in df_pedidos_bronze.select("id_pedido").distinct().collect()}
+ids_validos_uniao = ids_pedidos_validos | ids_bronze
+
+validos_uniao = df_itens_full.filter(df_itens_full.id_pedido.isin(ids_validos_uniao)).count()
+orfaos_reais = total_itens - validos_uniao
+
+print(f"Válidos comparando só com Silver (Seção 1)              : {itens_com_pedido_valido} ({itens_com_pedido_valido/total_itens:.1%})")
+print(f"Válidos comparando com Bronze + Silver (lógica oficial) : {validos_uniao} ({validos_uniao/total_itens:.1%})")
+print(f"Órfãos de verdade (nem em Bronze, nem em Silver)        : {orfaos_reais} ({orfaos_reais/total_itens:.1%})")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 2. Duplicidade de `id_pedido` na Silver
 # MAGIC
 # MAGIC Checagem motivada pelo mesmo problema encontrado na base da Squad 3 (`id_pedido` repetido entre

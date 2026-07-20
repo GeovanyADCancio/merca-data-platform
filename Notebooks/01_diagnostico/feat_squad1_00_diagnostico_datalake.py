@@ -158,3 +158,7 @@ else:
 # MAGIC * Se **nada existe (container nem apareceu)** → a Squad 1 ainda está no ponto de partida da
 # MAGIC   engenharia de dados, e o card de Feature Engineering precisa esperar essa base ser montada —
 # MAGIC   vale alinhar isso com o Lead, porque pode mudar a ordem de prioridade das tarefas.
+
+# COMMAND ----------
+
+

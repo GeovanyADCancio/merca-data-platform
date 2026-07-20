@@ -191,3 +191,171 @@ def gravar_delta(
     except Exception as e:
         log.error(f"Erro ao gravar {path}: {str(e)}")
         return False
+
+
+# ─────────────────────────────────────────────
+# FUNÇÕES — PERSISTÊNCIA DE MODELO
+# ─────────────────────────────────────────────
+def salvar_modelo(obj, caminho: str) -> bool:
+    """Serializa um objeto Python (ex: modelo treinado) via pickle e grava no Data Lake.
+    Usado para desacoplar o notebook de treino do notebook de score em dados novos —
+    ambos devem reutilizar exatamente o mesmo modelo já ajustado, nunca retreinar."""
+    import pickle
+    try:
+        dados = pickle.dumps(obj)
+        fs_client = get_squad1_client()
+        file_client = fs_client.get_file_client(caminho)
+        file_client.upload_data(dados, overwrite=True)
+        log.info(f"Modelo salvo em: {caminho} ({len(dados)} bytes)")
+        return True
+    except Exception as e:
+        log.error(f"Erro ao salvar modelo em {caminho}: {str(e)}")
+        return False
+
+
+def carregar_modelo(caminho: str):
+    """Lê um objeto serializado via pickle do Data Lake (contraparte de salvar_modelo)."""
+    import pickle
+    fs_client = get_squad1_client()
+    file_client = fs_client.get_file_client(caminho)
+    dados = file_client.download_file().readall()
+    return pickle.loads(dados)
+
+
+# ─────────────────────────────────────────────
+# FUNÇÕES — ENGENHARIA DE FEATURES (compartilhada entre treino e score)
+# ─────────────────────────────────────────────
+def construir_features_pedidos(df_pedidos, df_itens, df_produtos):
+    """
+    Constrói a tabela de features em nível de pedido (1 linha por id_pedido), a partir das tabelas
+    Silver de pedidos, itens_pedido e produtos. Compartilhada entre o notebook de treino
+    (feat_squad1_03_treinamento_isolation_forest) e o de score em dados novos — garante que os dois
+    calculem exatamente as mesmas colunas, do mesmo jeito, evitando divergência entre treino e uso
+    real do modelo (training-serving skew).
+
+    IMPORTANTE: df_pedidos deve conter o HISTÓRICO COMPLETO de pedidos, não um recorte só dos
+    pedidos "novos" a pontuar — as janelas de histórico do cliente (ticket médio, desvio, dias desde
+    a última compra) precisam enxergar todos os pedidos anteriores de cada cliente para calcular
+    corretamente, mesmo que só um subconjunto do resultado final seja usado depois.
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.window import Window
+
+    df_pedidos_tempo = (
+        df_pedidos
+        .withColumn("hora_do_pedido", F.hour("dt_pedido"))
+        .withColumn("dia_semana_pedido", F.dayofweek("dt_pedido"))
+    )
+
+    janela_historico = (
+        Window.partitionBy("id_cliente")
+        .orderBy("dt_pedido")
+        .rowsBetween(Window.unboundedPreceding, -1)
+    )
+    janela_pedido_anterior = Window.partitionBy("id_cliente").orderBy("dt_pedido")
+
+    df_pedidos_ts = df_pedidos_tempo.withColumn("dt_pedido_unix", F.col("dt_pedido").cast("long"))
+    janela_30_dias = (
+        Window.partitionBy("id_cliente")
+        .orderBy("dt_pedido_unix")
+        .rangeBetween(-30 * 86400, -1)
+    )
+
+    df_pedidos_features = (
+        df_pedidos_ts
+        .withColumn("ticket_medio_historico_cliente", F.avg("valor_total").over(janela_historico))
+        .withColumn("desvio_padrao_historico_cliente", F.stddev("valor_total").over(janela_historico))
+        .withColumn("qtd_pedidos_historico_cliente", F.count("id_pedido").over(janela_historico))
+        .withColumn("dt_pedido_anterior", F.lag("dt_pedido").over(janela_pedido_anterior))
+        .withColumn("dias_desde_ultima_compra", F.datediff(F.col("dt_pedido"), F.col("dt_pedido_anterior")))
+        .withColumn("qtd_pedidos_ultimos_30_dias", F.count("id_pedido").over(janela_30_dias))
+        .withColumn(
+            "desvio_valor_vs_historico",
+            F.when(
+                F.col("desvio_padrao_historico_cliente") > 0,
+                (F.col("valor_total") - F.col("ticket_medio_historico_cliente"))
+                / F.col("desvio_padrao_historico_cliente"),
+            ).otherwise(F.lit(None).cast("double")),
+        )
+        .withColumn(
+            "desvio_pct_vs_media_cliente",
+            F.when(
+                F.col("ticket_medio_historico_cliente") > 0,
+                (F.col("valor_total") - F.col("ticket_medio_historico_cliente"))
+                / F.col("ticket_medio_historico_cliente"),
+            ).otherwise(F.lit(None).cast("double")),
+        )
+        .withColumn(
+            "razao_frete_valor",
+            F.when(F.col("valor_total") > 0, F.col("valor_frete") / F.col("valor_total")),
+        )
+    )
+
+    df_itens_produtos = df_itens.join(df_produtos.select("sku", "id_categoria"), on="sku", how="left")
+
+    df_composicao_pedido = (
+        df_itens_produtos
+        .groupBy("id_pedido")
+        .agg(
+            F.count("id_item_pedido").alias("qtd_linhas_itens"),
+            F.sum("quantidade").alias("qtd_unidades_total"),
+            F.countDistinct("id_categoria").alias("qtd_categorias_distintas"),
+            F.sum(
+                F.col("quantidade") * F.col("preco_unitario") - F.col("desconto_aplicado")
+            ).alias("valor_itens_calculado"),
+        )
+    )
+
+    df_final = (
+        df_pedidos_features
+        .join(df_composicao_pedido, on="id_pedido", how="left")
+        .withColumn(
+            "ticket_medio_por_unidade",
+            F.when(F.col("qtd_unidades_total") > 0, F.col("valor_total") / F.col("qtd_unidades_total")),
+        )
+        .withColumn(
+            "diferenca_valor_itens_vs_pedido",
+            F.col("valor_total") - F.col("valor_itens_calculado"),
+        )
+    )
+
+    colunas_features = [
+        "id_pedido", "id_cliente", "dt_pedido", "valor_total", "valor_frete", "razao_frete_valor",
+        "hora_do_pedido", "dia_semana_pedido",
+        "ticket_medio_historico_cliente", "desvio_padrao_historico_cliente",
+        "qtd_pedidos_historico_cliente", "dias_desde_ultima_compra",
+        "qtd_pedidos_ultimos_30_dias", "desvio_valor_vs_historico", "desvio_pct_vs_media_cliente",
+        "qtd_linhas_itens", "qtd_unidades_total", "qtd_categorias_distintas",
+        "ticket_medio_por_unidade", "valor_itens_calculado", "diferenca_valor_itens_vs_pedido",
+    ]
+
+    return df_final.select(*colunas_features)
+
+
+# Colunas efetivamente usadas como entrada do Isolation Forest (exclui identificadores e datas)
+COLUNAS_MODELO_ANOMALIA = [
+    "valor_total", "valor_frete", "razao_frete_valor",
+    "hora_do_pedido", "dia_semana_pedido",
+    "ticket_medio_historico_cliente", "desvio_padrao_historico_cliente",
+    "qtd_pedidos_historico_cliente", "dias_desde_ultima_compra",
+    "qtd_pedidos_ultimos_30_dias", "desvio_valor_vs_historico", "desvio_pct_vs_media_cliente",
+    "qtd_linhas_itens", "qtd_unidades_total", "qtd_categorias_distintas",
+    "ticket_medio_por_unidade", "valor_itens_calculado", "diferenca_valor_itens_vs_pedido",
+]
+
+# Preenchimento padrão para colunas que ficam nulas na primeira compra de cada cliente
+# (ver decisão registrada no notebook de treino, Seção 2)
+VALORES_NULOS_PADRAO_FEATURES = {
+    "ticket_medio_historico_cliente": 0.0,
+    "desvio_padrao_historico_cliente": 0.0,
+    "dias_desde_ultima_compra": 0,
+    "desvio_valor_vs_historico": 0.0,
+    "desvio_pct_vs_media_cliente": 0.0,
+    "qtd_linhas_itens": 0,
+    "qtd_unidades_total": 0,
+    "qtd_categorias_distintas": 0,
+    "ticket_medio_por_unidade": 0.0,
+    "valor_itens_calculado": 0.0,
+    "diferenca_valor_itens_vs_pedido": 0.0,
+}
+
