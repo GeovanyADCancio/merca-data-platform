@@ -160,31 +160,3 @@ for tabela in TABELAS_COMPARAR:
 # MAGIC nunca tivessem sido deletadas. Com a biblioteca atualizada (célula acima), esse fallback não deve
 # MAGIC ser necessário para as tabelas da Squad 3 — mas vale essa checagem manual antes de usar os dados
 # MAGIC para treinar o modelo.
-
-# COMMAND ----------
-
-from deltalake import DeltaTable
-
-path_dq_logs = f"abfss://squad1@{ADLS_STORAGE_ACCOUNT}.dfs.core.windows.net/dq_monitoring_logs"
-
-dt_dq_logs = DeltaTable(path_dq_logs, storage_options=get_storage_options())
-df_dq_logs = spark.createDataFrame(dt_dq_logs.to_pandas())
-
-print(f"Total de linhas: {df_dq_logs.count()}\n")
-print("📋 Schema:")
-df_dq_logs.printSchema()
-
-print("\n👀 Amostra:")
-display(df_dq_logs.limit(10))
-
-# COMMAND ----------
-
-df_pedidos_check = ler_delta("silver", "ecommerce_pedidos")
-
-total_linhas = df_pedidos_check.count()
-total_ids_distintos = df_pedidos_check.select("id_pedido").distinct().count()
-duplicados = total_linhas - total_ids_distintos
-
-print(f"Total de linhas     : {total_linhas}")
-print(f"id_pedido distintos : {total_ids_distintos}")
-print(f"Duplicados          : {duplicados}")

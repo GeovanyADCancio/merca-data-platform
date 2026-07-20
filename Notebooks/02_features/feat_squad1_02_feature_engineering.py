@@ -270,27 +270,3 @@ else:
 # MAGIC Com `squad1/gold/features_pedidos` disponível, a etapa seguinte do CRISP-DM é a *Modeling*: treinar
 # MAGIC o Isolation Forest sobre essas colunas numéricas e gerar o score de anomalia por pedido — o próximo
 # MAGIC card da squad.
-
-# COMMAND ----------
-
-df_itens_full = ler_delta("silver", "ecommerce_itens_pedido")
-ids_pedidos_validos = {row["id_pedido"] for row in df_pedidos.select("id_pedido").distinct().collect()}
-
-total_itens = df_itens_full.count()
-itens_com_pedido_valido = df_itens_full.filter(
-    df_itens_full.id_pedido.isin(ids_pedidos_validos)
-).count()
-itens_orfaos = total_itens - itens_com_pedido_valido
-
-print(f"Total de itens na Silver          : {total_itens}")
-print(f"Itens com pedido correspondente    : {itens_com_pedido_valido}")
-print(f"Itens órfãos (sem pedido na Silver): {itens_orfaos} ({itens_orfaos/total_itens:.1%})")
-
-# COMMAND ----------
-
-fs_client = get_squad1_client()
-
-print("📂 Conteúdo de 'dq_monitoring_logs':\n")
-for path in fs_client.get_paths(path="dq_monitoring_logs", recursive=True):
-    tipo = "📁 pasta" if path.is_directory else "📄 arquivo"
-    print(f" - {tipo}: {path.name}")

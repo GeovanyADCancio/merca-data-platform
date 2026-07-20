@@ -1,0 +1,12 @@
+# INSTRUÇÕES PARA VALIDAÇÃO (CODE REVIEW)
+# 1. Crie um arquivo chamado .env na raiz do seu repositório local.
+# 2. Cole este conteúdo e preencha com as credenciais enviadas pelo Lead.
+# NUNCA comite o seu arquivo .env preenchido!
+
+ADLS_CLIENT_ID=
+ADLS_TENANT_ID=
+ADLS_CLIENT_SECRET=
+SQL_HOST=
+SQL_DATABASE=
+SQL_USERNAME=
+SQL_PASSWORD=
