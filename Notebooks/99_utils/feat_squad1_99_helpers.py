@@ -2,11 +2,11 @@
 # MAGIC %md
 # MAGIC # Funções Utilitárias Centralizadas (Squad 1)
 # MAGIC **Projeto: Merca Data Platform — Data Quality em Tempo Real**
-# MAGIC
+# MAGIC 
 # MAGIC Este notebook centraliza as funções reutilizáveis de acesso ao Data Lake da Squad 1: leitura e
 # MAGIC gravação de tabelas Delta no container `squad1`. O padrão segue a mesma estrutura já validada
 # MAGIC pela Squad 2, adaptando apenas o container de destino.
-# MAGIC
+# MAGIC 
 # MAGIC **Decisões arquiteturais:**
 # MAGIC * **Reaproveitamento de padrão:** as funções de leitura/gravação Delta (`ler_delta`, `gravar_delta`)
 # MAGIC   replicam a lógica já testada pela Squad 2, incluindo o fallback via Azure SDK caso a engine
@@ -15,9 +15,7 @@
 # MAGIC   checkpoint/snapshot de ingestão. As camadas Bronze e Silver da Squad 1 já existem (confirmado
 # MAGIC   no notebook de diagnóstico) e não são de responsabilidade deste card — o foco aqui é leitura de
 # MAGIC   Silver e gravação de features na camada Gold.
-
 # COMMAND ----------
-
 import os
 import logging
 import pandas as pd
@@ -67,17 +65,13 @@ def _validar_credenciais() -> None:
         raise EnvironmentError("Credenciais ausentes. Verificar o arquivo .env")
 
 _validar_credenciais()
-
 # COMMAND ----------
-
 # MAGIC %md
 # MAGIC ### Conexão com o Data Lake
-# MAGIC
+# MAGIC 
 # MAGIC As funções abaixo centralizam a construção do caminho Delta (`get_delta_path`) e a criação do
 # MAGIC cliente autenticado do ADLS (`get_squad1_client`), evitando repetição dessa lógica em cada notebook.
-
 # COMMAND ----------
-
 def get_storage_options() -> dict:
     return {
         "account_name": ADLS_STORAGE_ACCOUNT,
@@ -104,18 +98,55 @@ def get_squad1_client():
     )
     return service_client.get_file_system_client(SQUAD1_CONTAINER)
 
-# COMMAND ----------
 
+def get_delta_path_squad3(camada: str, tabela: str) -> str:
+    corpo = tabela if not camada else f"{camada}/{tabela}"
+    return f"abfss://squad3@{ADLS_STORAGE_ACCOUNT}.dfs.core.windows.net/{corpo}"
+
+
+def ler_delta_squad3(camada: str, tabela: str) -> "pyspark.sql.DataFrame":
+    """
+    Lê uma tabela Delta do container squad3 usando o leitor NATIVO do Spark, com credenciais
+    passadas via opções escopadas à própria leitura — não spark.conf.set() global, preservando a
+    decisão arquitetural de não injetar credenciais globalmente na sessão Serverless.
+
+    Diferente de ler_delta (que usa a biblioteca deltalake/delta-rs), esta função usa o motor
+    nativo do Databricks, que suporta corretamente tabelas com Deletion Vectors — necessário
+    porque as tabelas Silver da Squad 3 usam esse recurso, e a biblioteca deltalake não suporta
+    leitura completa de dados nessas tabelas (confirmado nos notebooks de diagnóstico da squad;
+    só a leitura de schema funciona pela via antiga).
+    """
+    caminho = get_delta_path_squad3(camada, tabela)
+    storage_opts = get_storage_options()
+    account_name = storage_opts["account_name"]
+
+    df = (
+        spark.read
+        .format("delta")
+        .option(f"fs.azure.account.auth.type.{account_name}.dfs.core.windows.net", "OAuth")
+        .option(
+            f"fs.azure.account.oauth.provider.type.{account_name}.dfs.core.windows.net",
+            "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider",
+        )
+        .option(f"fs.azure.account.oauth2.client.id.{account_name}.dfs.core.windows.net", storage_opts["client_id"])
+        .option(f"fs.azure.account.oauth2.client.secret.{account_name}.dfs.core.windows.net", storage_opts["client_secret"])
+        .option(
+            f"fs.azure.account.oauth2.client.endpoint.{account_name}.dfs.core.windows.net",
+            f"https://login.microsoftonline.com/{storage_opts['tenant_id']}/oauth2/token",
+        )
+        .load(caminho)
+    )
+    log.info(f"Lido via Spark nativo (squad3): {df.count()} linhas — {camada}/{tabela}")
+    return df
+# COMMAND ----------
 # MAGIC %md
 # MAGIC ### Leitura e gravação de tabelas Delta
-# MAGIC
+# MAGIC 
 # MAGIC `ler_delta` tenta primeiro a leitura nativa via biblioteca `deltalake`; caso essa via encontre
 # MAGIC alguma restrição do ambiente, um fallback via Azure SDK garante a entrega do DataFrame mesmo assim.
 # MAGIC `gravar_delta` grava um DataFrame PySpark como tabela Delta, decidindo automaticamente entre
 # MAGIC `overwrite` (quando a tabela ainda não existe) e o modo solicitado (quando ela já existe).
-
 # COMMAND ----------
-
 def ler_delta(camada: str, tabela: str) -> "pyspark.sql.DataFrame":
     import io
 
@@ -184,6 +215,7 @@ def gravar_delta(
             mode=modo_real,
             storage_options=storage_opts,
             partition_by=partition_by,
+            schema_mode="overwrite" if modo_real == "overwrite" else None,
         )
         log.info(f"Gravado: {path} → {len(pdf)} linhas | modo: {modo_real}")
         return True
@@ -358,4 +390,57 @@ VALORES_NULOS_PADRAO_FEATURES = {
     "valor_itens_calculado": 0.0,
     "diferenca_valor_itens_vs_pedido": 0.0,
 }
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ### Sincronizacao opcional com SQL Server (Looker)
+# MAGIC
+# MAGIC Visto no notebook do Jonathan (`utils.py` dele) — ele replica as tabelas
+# MAGIC finais para o SQL Server, com o comentario de que e dali que o Looker
+# MAGIC consome. Ainda **nao confirmado** se isso vale para o nosso ambiente
+# MAGIC tambem (a decisao e de quem administra o Looker da squad). Por isso a
+# MAGIC funcao abaixo e segura de chamar mesmo sem essa confirmacao: se as
+# MAGIC variaveis `JDBC_HOSTNAME`/`JDBC_DATABASE` nao estiverem no `.env`, ela so
+# MAGIC avisa e nao faz nada — nenhum notebook quebra por causa disso.
+# COMMAND ----------
+def escrever_sqlserver_gold(df_spark, schema: str, tabela: str, modo: str = "overwrite") -> bool:
+    """
+    Replica um DataFrame Spark para o SQL Server, camada adicional para o caso
+    do Looker consumir de la em vez de direto do Delta/gold. Retorna False (e
+    so avisa) se JDBC_HOSTNAME/JDBC_DATABASE nao estiverem configurados no
+    .env — nao lanca excecao, para nao quebrar notebooks que nao precisam
+    disso.
+    """
+    jdbc_hostname = os.getenv("JDBC_HOSTNAME")
+    jdbc_database = os.getenv("JDBC_DATABASE")
+    jdbc_username = os.getenv("JDBC_USERNAME")
+    jdbc_password = os.getenv("JDBC_PASSWORD")
 
+    if not jdbc_hostname or not jdbc_database:
+        log.info(
+            f"SQL Server nao configurado (.env sem JDBC_HOSTNAME/JDBC_DATABASE) — "
+            f"sincronizacao de {schema}.{tabela} ignorada."
+        )
+        return False
+
+    tabela_destino = f"{schema}.{tabela}"
+    try:
+        (
+            df_spark.write
+            .format("sqlserver")
+            .mode(modo)
+            .option("host", jdbc_hostname)
+            .option("port", "1433")
+            .option("database", jdbc_database)
+            .option("user", jdbc_username)
+            .option("password", jdbc_password)
+            .option("dbtable", tabela_destino)
+            .option("encrypt", "true")
+            .option("trustServerCertificate", "false")
+            .save()
+        )
+        log.info(f"Sincronizado no SQL Server: {tabela_destino}")
+        return True
+    except Exception as e:
+        log.error(f"Erro ao sincronizar {tabela_destino} no SQL Server: {str(e)}")
+        return False
+# COMMAND ----------
